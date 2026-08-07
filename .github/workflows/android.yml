@@ -37,7 +37,7 @@ jobs:
       - name: Install Android SDK
         run: |
     yes | sdkmanager --licenses
-    sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+    sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0 platform-tools"
     echo "ANDROID_BUILD_TOOLS_VERSION=35.0.0" >> $GITHUB_ENV
     - name: Set Build Tools Version
       run: |
@@ -46,6 +46,11 @@ jobs:
     - name: Force Build Tools 35
       run: |
         sed -i "s/android.build_tools_version.*/android.build_tools_version = 35.0.0/" buildozer.spec
+
+    - name: Check AIDL
+      run: |
+        ls $ANDROID_HOME/build-tools
+        ls $ANDROID_HOME/build-tools/35.0.0/aidl
 
       - name: Build APK
         run: |
