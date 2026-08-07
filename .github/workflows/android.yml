@@ -36,8 +36,11 @@ jobs:
 
       - name: Install Android SDK
         run: |
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
-
+    yes | sdkmanager --licenses
+    sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+git add .
+git commit -m "Fix Android build tools version"
+git push origin main
       - name: Build APK
         run: |
           buildozer android debug
