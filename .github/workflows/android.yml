@@ -34,7 +34,14 @@ jobs:
     yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
     $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Build APK
+      - name: Install Android SDK tools
+        run: |
+          mkdir -p $HOME/.buildozer/android/platform/android-sdk
+          cp -r $ANDROID_HOME/build-tools $HOME/.buildozer/android/platform/android-sdk/
+          cp -r $ANDROID_HOME/platforms $HOME/.buildozer/android/platform/android-sdk/
+          cp -r $ANDROID_HOME/platform-tools $HOME/.buildozer/android/platform/android-sdk/
+          ls $HOME/.buildozer/android/platform/android-sdk/build-tools     
+ - name: Build APK
         run: |
           buildozer android debug
 
