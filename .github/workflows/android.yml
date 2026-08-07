@@ -43,6 +43,10 @@ jobs:
       run: |
         echo "BUILDOZER_BUILD_TOOLS_VERSION=35.0.0" >> $GITHUB_ENV
 
+    - name: Force Build Tools 35
+      run: |
+        sed -i "s/android.build_tools_version.*/android.build_tools_version = 35.0.0/" buildozer.spec
+
       - name: Build APK
         run: |
           buildozer android debug
