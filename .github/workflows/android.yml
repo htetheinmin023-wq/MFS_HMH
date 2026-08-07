@@ -61,6 +61,11 @@ jobs:
       run: |
         echo "android.build_tools_version = 35.0.0" >> buildozer.spec
 
+    - name: Install Build Tools 37
+      run: |
+        yes | sdkmanager --licenses
+        sdkmanager "build-tools;37.0.0"
+
       - name: Build APK
         run: |
           buildozer android debug
