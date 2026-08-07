@@ -1,4 +1,12 @@
-name: Build MFS HMH APK
+      - name: Setup Android SDK
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          ls $ANDROID_HOME/build-tools
+          ls $ANDROID_HOME/build-tools/35.0.0
+      - name: Build APK
+        run: |
+          buildozer android debug
 
 on:
   workflow_dispatch:
