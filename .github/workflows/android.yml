@@ -28,9 +28,12 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK
+      - name: Accept Android licenses
         run: |
           yes | sdkmanager --licenses || true
+
+      - name: Install Android SDK packages
+        run: |
           sdkmanager "platform-tools"
           sdkmanager "platforms;android-35"
           sdkmanager "build-tools;35.0.0"
@@ -39,37 +42,24 @@ jobs:
         run: |
           echo "ANDROIDSDK=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "ANDROIDAPI=35" >> $GITHUB_ENV
-          echo "ANDROIDMINAPI=24" >> $GITHUB_ENV
           echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
-          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            autoconf \
-            automake \
-            libtool \
-            libtool-bin \
-            pkg-config \
-            gettext \
-            cmake \
-            ninja-build
 
       - name: Install Buildozer
         run: |
           python -m pip install --upgrade pip
           pip install buildozer==1.6.0 cython==0.29.37
 
-      - name: Clean Buildozer
-        run: |
-          rm -rf .buildozer
-          rm -rf bin
-
       - name: Build APK
         run: |
-          buildozer android debug -v
+          for i in 1 2 3; do
+            if buildozer android debug; then
+              exit 0
+            fi
+            echo "Build attempt $i failed. Retrying..."
+            rm -rf .buildozer/android/platform/build-arm64-v8a/packages
+            sleep 20
+          done
+          exit 1
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
