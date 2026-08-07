@@ -35,13 +35,18 @@ jobs:
 
       - name: Accept Android licenses
         run: |
-          yes | sdkmanager --licenses
+          yes | sdkmanager --licenses || true
 
       - name: Install Android SDK packages
         run: |
           sdkmanager "platform-tools"
           sdkmanager "platforms;android-35"
           sdkmanager "build-tools;35.0.0"
+          sdkmanager "build-tools;37.0.0"
+
+      - name: Accept Android licenses again
+        run: |
+          yes | sdkmanager --licenses || true
 
       - name: Build APK
         run: |
