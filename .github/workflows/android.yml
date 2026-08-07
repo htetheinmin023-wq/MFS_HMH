@@ -37,7 +37,7 @@ jobs:
       - name: Install Android SDK
         run: |
     yes | sdkmanager --licenses
-    sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0 platform-tools"
+    sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "build-tools;37.0.0 platform-tools"
     echo "ANDROID_BUILD_TOOLS_VERSION=35.0.0" >> $GITHUB_ENV
     - name: Set Build Tools Version
       run: |
