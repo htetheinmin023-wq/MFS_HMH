@@ -6,12 +6,71 @@ from kivy.uix.textinput import TextInput
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.filechooser import FileChooserIconView
 from kivy.uix.popup import Popup
+from kivy.uix.image import Image
+from kivy.uix.widget import Widget
+import os
+import shutil
 
+
+class ImagePicker(BoxLayout):
+    def __init__(self, title, callback, multi=False, **kwargs):
+        super().__init__(orientation="vertical", **kwargs)
+
+        self.callback = callback
+        self.multi = multi
+
+        self.chooser = FileChooserIconView(
+            filters=["*.jpg", "*.jpeg", "*.png", "*.webp"],
+            multiselect=multi
+        )
+
+        self.add_widget(self.chooser)
+
+        buttons = BoxLayout(
+            size_hint_y=None,
+            height=55,
+            spacing=5
+        )
+
+        select = Button(text="Select")
+        cancel = Button(text="Cancel")
+
+        select.bind(on_press=self.select)
+        cancel.bind(on_press=lambda x: self.popup.dismiss())
+
+        buttons.add_widget(select)
+        buttons.add_widget(cancel)
+
+        self.add_widget(buttons)
+
+        self.popup = Popup(
+            title=title,
+            content=self,
+            size_hint=(0.95, 0.9)
+        )
+
+    def open(self):
+        self.popup.open()
+
+    def select(self, instance):
+        if not self.chooser.selection:
+            return
+
+        paths = self.chooser.selection
+
+        self.popup.dismiss()
+        self.callback(paths)
 
 
 class AIChat(BoxLayout):
+
     def __init__(self, **kwargs):
-        super().__init__(orientation="vertical", spacing=8, padding=10, **kwargs)
+        super().__init__(
+            orientation="vertical",
+            spacing=8,
+            padding=10,
+            **kwargs
+        )
 
         self.chat = Label(
             text="HMH AI\n\nမင်္ဂလာပါ။ ဘာမေးချင်လဲ?",
@@ -19,7 +78,10 @@ class AIChat(BoxLayout):
             halign="left",
             valign="top"
         )
-        self.chat.bind(texture_size=self.chat.setter("size"))
+
+        self.chat.bind(
+            texture_size=self.chat.setter("size")
+        )
 
         scroll = ScrollView()
         scroll.add_widget(self.chat)
@@ -31,68 +93,57 @@ class AIChat(BoxLayout):
             size_hint_y=None,
             height=100
         )
+
         self.add_widget(self.input_box)
 
-        buttons = BoxLayout(size_hint_y=None, height=55, spacing=5)
+        buttons = BoxLayout(
+            size_hint_y=None,
+            height=55,
+            spacing=5
+        )
 
         send = Button(text="Send")
-        image = Button(text=" Image")
-        video = Button(text=" Video")
         back = Button(text="Back")
 
         send.bind(on_press=self.send_message)
-        image.bind(on_press=lambda x: self.choose_file(["*.jpg", "*.jpeg", "*.png", "*.webp"]))
-        video.bind(on_press=lambda x: self.choose_file(["*.mp4", "*.mkv", "*.mov", "*.avi"]))
-        back.bind(on_press=lambda x: self.back_to_menu())
+        back.bind(
+            on_press=lambda x:
+            App.get_running_app().show_menu()
+        )
 
         buttons.add_widget(send)
-        buttons.add_widget(image)
-        buttons.add_widget(video)
         buttons.add_widget(back)
 
         self.add_widget(buttons)
 
     def send_message(self, instance):
+
         message = self.input_box.text.strip()
 
         if not message:
             return
 
-        self.chat.text += f"\n\nYou: {message}\n\nHMH AI: API credits မရှိသေးလို့ အခု Demo Mode နဲ့ လုပ်နေပါတယ်။"
+        self.chat.text += (
+            f"\n\nYou: {message}"
+            "\n\nHMH AI: Demo Mode"
+        )
+
         self.input_box.text = ""
-
-    def choose_file(self, filters):
-        chooser = FileChooserIconView(filters=filters)
-
-        popup = Popup(
-            title="Choose file",
-            content=chooser,
-            size_hint=(0.95, 0.9)
-        )
-
-        chooser.bind(
-            on_submit=lambda chooser, selection, touch:
-            self.file_selected(selection, popup)
-        )
-
-        popup.open()
-
-    def file_selected(self, selection, popup):
-        if selection:
-            path = selection[0]
-            self.chat.text += f"\n\n File selected:\n{path}\n\nHMH AI: File ရွေးပြီးပါပြီ။"
-            popup.dismiss()
-
-    def back_to_menu(self):
-        App.get_running_app().show_menu()
 
 
 class MFSApp(App):
+
     def build(self):
+
+        os.makedirs("input", exist_ok=True)
+        os.makedirs("output", exist_ok=True)
+
         self.show_menu()
+
         return self.root
 
     def show_menu(self):
+
         layout = BoxLayout(
             orientation="vertical",
             spacing=10,
@@ -105,40 +156,253 @@ class MFSApp(App):
             size_hint_y=None,
             height=60
         )
+
         layout.add_widget(title)
 
         btn1 = Button(text="1. Face Scan")
         btn2 = Button(text="2. Face Enhance")
         btn3 = Button(text="3. Face Blend")
-        btn4 = Button(text="4. HMH AI Chat")
+        btn4 = Button(text="4. Face Swap")
+        btn5 = Button(text="5. HMH AI Chat")
 
-        btn1.bind(on_press=lambda x: self.run_face_scan())
-        btn2.bind(on_press=lambda x: self.run_face_enhance())
-        btn3.bind(on_press=lambda x: self.run_face_blend())
-        btn4.bind(on_press=lambda x: self.show_ai_chat())
+        btn1.bind(
+            on_press=lambda x:
+            self.choose_scan_image()
+        )
+
+        btn2.bind(
+            on_press=lambda x:
+            self.choose_enhance_image()
+        )
+
+        btn3.bind(
+            on_press=lambda x:
+            self.choose_blend_images()
+        )
+
+        btn4.bind(
+            on_press=lambda x:
+            self.choose_swap_images()
+        )
+
+        btn5.bind(
+            on_press=lambda x:
+            self.show_ai_chat()
+        )
 
         layout.add_widget(btn1)
         layout.add_widget(btn2)
         layout.add_widget(btn3)
         layout.add_widget(btn4)
+        layout.add_widget(btn5)
 
         self.root = layout
 
-    def run_face_scan(self):
-        from modules.face_scan import face_scan
-        face_scan()
+    def choose_scan_image(self):
 
-    def run_face_enhance(self):
-        from modules.face_enhance import face_enhance
-        face_enhance()
+        picker = ImagePicker(
+            "Select Face Image",
+            self.scan_selected
+        )
 
-    def run_face_blend(self):
-        from modules.face_blend import face_blend
-        face_blend()
+        picker.open()
+
+    def scan_selected(self, paths):
+
+        try:
+
+            shutil.copy(
+                paths[0],
+                "input/face.jpg"
+            )
+
+            from modules.face_scan import face_scan
+
+            face_scan()
+
+            self.show_result(
+                "output/MFS_face_scan.jpg",
+                "Face Scan Result"
+            )
+
+        except Exception as e:
+
+            self.show_error(str(e))
+
+    def choose_enhance_image(self):
+
+        picker = ImagePicker(
+            "Select Image",
+            self.enhance_selected
+        )
+
+        picker.open()
+
+    def enhance_selected(self, paths):
+
+        try:
+
+            shutil.copy(
+                paths[0],
+                "input/face.jpg"
+            )
+
+            from modules.face_enhance import face_enhance
+
+            face_enhance()
+
+            self.show_result(
+                "output/MFS_face_enhanced.jpg",
+                "Face Enhance Result"
+            )
+
+        except Exception as e:
+
+            self.show_error(str(e))
+
+    def choose_blend_images(self):
+
+        picker = ImagePicker(
+            "Select 2 Images",
+            self.blend_selected,
+            multi=True
+        )
+
+        picker.open()
+
+    def blend_selected(self, paths):
+
+        if len(paths) < 2:
+
+            self.show_error(
+                "ပုံ ၂ ပုံရွေးပေးပါ။"
+            )
+
+            return
+
+        try:
+
+            shutil.copy(
+                paths[0],
+                "input/face1.jpg"
+            )
+
+            shutil.copy(
+                paths[1],
+                "input/face2.jpg"
+            )
+
+            from modules.face_blend import face_blend
+
+            face_blend()
+
+            self.show_result(
+                "output/MFS_blend_result.jpg",
+                "Face Blend Result"
+            )
+
+        except Exception as e:
+
+            self.show_error(str(e))
+
+    def choose_swap_images(self):
+
+        picker = ImagePicker(
+            "Select 2 Images for Face Swap",
+            self.swap_selected,
+            multi=True
+        )
+
+        picker.open()
+
+    def swap_selected(self, paths):
+
+        if len(paths) < 2:
+
+            self.show_error(
+                "Face Swap အတွက် ပုံ ၂ ပုံရွေးပေးပါ။"
+            )
+
+            return
+
+        self.show_error(
+            "Face Swap module မရှိသေးပါ။\n"
+            "အခု Button ကို ထည့်ပြီးပါပြီ။"
+        )
+
+    def show_result(self, path, title):
+
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=10,
+            padding=10
+        )
+
+        if os.path.exists(path):
+
+            image = Image(
+                source=path
+            )
+
+            layout.add_widget(image)
+
+        else:
+
+            layout.add_widget(
+                Label(
+                    text="Result file မတွေ့ပါ။"
+                )
+            )
+
+        back = Button(
+            text="Back",
+            size_hint_y=None,
+            height=55
+        )
+
+        back.bind(
+            on_press=lambda x:
+            self.show_menu()
+        )
+
+        layout.add_widget(back)
+
+        self.root = layout
+
+    def show_error(self, message):
+
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=10,
+            padding=10
+        )
+
+        layout.add_widget(
+            Label(
+                text=message
+            )
+        )
+
+        back = Button(
+            text="OK",
+            size_hint_y=None,
+            height=55
+        )
+
+        back.bind(
+            on_press=lambda x:
+            self.show_menu()
+        )
+
+        layout.add_widget(back)
+
+        self.root = layout
 
     def show_ai_chat(self):
+
         self.root = AIChat()
 
 
 if __name__ == "__main__":
+
     MFSApp().run()
