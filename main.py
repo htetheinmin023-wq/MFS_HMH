@@ -93,6 +93,7 @@ class AIChat(BoxLayout):
 class MFSApp(App):
     def build(self):
         self.show_menu()
+        return self.root
 
     def show_menu(self):
         layout = BoxLayout(
