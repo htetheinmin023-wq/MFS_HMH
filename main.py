@@ -7,9 +7,6 @@ from kivy.uix.scrollview import ScrollView
 from kivy.uix.filechooser import FileChooserIconView
 from kivy.uix.popup import Popup
 
-from modules.face_scan import face_scan
-from modules.face_enhance import face_enhance
-from modules.face_blend import face_blend
 
 
 class AIChat(BoxLayout):
@@ -115,9 +112,9 @@ class MFSApp(App):
         btn3 = Button(text="3. Face Blend")
         btn4 = Button(text="4. HMH AI Chat")
 
-        btn1.bind(on_press=lambda x: face_scan())
-        btn2.bind(on_press=lambda x: face_enhance())
-        btn3.bind(on_press=lambda x: face_blend())
+        btn1.bind(on_press=lambda x: self.run_face_scan())
+        btn2.bind(on_press=lambda x: self.run_face_enhance())
+        btn3.bind(on_press=lambda x: self.run_face_blend())
         btn4.bind(on_press=lambda x: self.show_ai_chat())
 
         layout.add_widget(btn1)
@@ -126,6 +123,18 @@ class MFSApp(App):
         layout.add_widget(btn4)
 
         self.root = layout
+
+    def run_face_scan(self):
+        from modules.face_scan import face_scan
+        face_scan()
+
+    def run_face_enhance(self):
+        from modules.face_enhance import face_enhance
+        face_enhance()
+
+    def run_face_blend(self):
+        from modules.face_blend import face_blend
+        face_blend()
 
     def show_ai_chat(self):
         self.root = AIChat()
