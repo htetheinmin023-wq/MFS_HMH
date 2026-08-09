@@ -15,52 +15,41 @@ import shutil
 class ImagePicker(BoxLayout):
     def __init__(self, title, callback, multi=False, **kwargs):
         super().__init__(orientation="vertical", **kwargs)
-
+        self.title = title
         self.callback = callback
         self.multi = multi
-
         self.chooser = FileChooserIconView(
             filters=["*.jpg", "*.jpeg", "*.png", "*.webp"],
-            multiselect=multi
+            multiselect=multi,
         )
-
         self.add_widget(self.chooser)
 
-        buttons = BoxLayout(
-            size_hint_y=None,
-            height=55,
-            spacing=5
-        )
-
-        select = Button(text="Select")
-        cancel = Button(text="Cancel")
-
-        select.bind(on_press=self.select)
-        cancel.bind(on_press=lambda x: self.popup.dismiss())
-
-        buttons.add_widget(select)
-        buttons.add_widget(cancel)
-
-        self.add_widget(buttons)
-
-        self.popup = Popup(
-            title=title,
-            content=self,
-            size_hint=(0.95, 0.9)
-        )
-
     def open(self):
+        self.popup = Popup(
+            title=self.title,
+            content=self,
+            size_hint=(0.95, 0.9),
+        )
         self.popup.open()
 
-    def select(self, instance):
-        if not self.chooser.selection:
-            return
-
-        paths = self.chooser.selection
-
-        self.popup.dismiss()
-        self.callback(paths)
-
+    def select(self):
+        try:
+            paths = list(self.chooser.selection)
+            if not paths:
+                return
+            os.makedirs("input", exist_ok=True)
+            copied = []
+            for path in paths:
+                name = os.path.basename(path)
+                dest = os.path.join("input", name)
+                shutil.copy2(path, dest)
+                copied.append(dest)
+            self.popup.dismiss()
+            self.callback(copied)
+        except Exception as e:
+            App.get_running_app().show_error(
+                "Image selection failed:\\n" + str(e)
+            )
 
 class AIChat(BoxLayout):
 
