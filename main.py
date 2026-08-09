@@ -13,53 +13,179 @@ import shutil
 
 
 class ImagePicker(BoxLayout):
-    def __init__(self, title, callback, multi=False, **kwargs):
-        super().__init__(orientation="vertical", **kwargs)
 
+    def __init__(self, title, callback, multi=False, **kwargs):
+        super().__init__(
+            orientation="vertical",
+            **kwargs
+        )
+
+        self.title = title
         self.callback = callback
         self.multi = multi
-
-        self.chooser = FileChooserIconView(
-            filters=["*.jpg", "*.jpeg", "*.png", "*.webp"],
-            multiselect=multi
-        )
-
-        self.add_widget(self.chooser)
-
-        buttons = BoxLayout(
-            size_hint_y=None,
-            height=55,
-            spacing=5
-        )
-
-        select = Button(text="Select")
-        cancel = Button(text="Cancel")
-
-        select.bind(on_press=self.select)
-        cancel.bind(on_press=lambda x: self.popup.dismiss())
-
-        buttons.add_widget(select)
-        buttons.add_widget(cancel)
-
-        self.add_widget(buttons)
-
-        self.popup = Popup(
-            title=title,
-            content=self,
-            size_hint=(0.95, 0.9)
-        )
+        self.request_code = 12345
 
     def open(self):
-        self.popup.open()
+        try:
+            from jnius import autoclass
 
-    def select(self, instance):
-        if not self.chooser.selection:
+            Intent = autoclass("android.content.Intent")
+            PythonActivity = autoclass(
+                "org.kivy.android.PythonActivity"
+            )
+
+            intent = Intent(
+                Intent.ACTION_OPEN_DOCUMENT
+            )
+
+            intent.addCategory(
+                Intent.CATEGORY_OPENABLE
+            )
+
+            intent.setType("image/*")
+
+            if self.multi:
+                intent.putExtra(
+                    Intent.EXTRA_ALLOW_MULTIPLE,
+                    True
+                )
+
+            self.activity = PythonActivity.mActivity
+
+            self.activity.bind(
+                on_activity_result=self.on_activity_result
+            )
+
+            self.activity.startActivityForResult(
+                intent,
+                self.request_code
+            )
+
+        except Exception as e:
+            App.get_running_app().show_error(
+                "File Picker Error:\n" + str(e)
+            )
+
+    def on_activity_result(
+        self,
+        request_code,
+        result_code,
+        intent
+    ):
+
+        if request_code != self.request_code:
             return
 
-        paths = self.chooser.selection
+        try:
+            from jnius import autoclass
 
-        self.popup.dismiss()
-        self.callback(paths)
+            Activity = autoclass(
+                "android.app.Activity"
+            )
+
+            if result_code != Activity.RESULT_OK:
+                return
+
+            paths = []
+
+            clip_data = intent.getClipData()
+
+            if clip_data is not None:
+
+                count = clip_data.getItemCount()
+
+                for i in range(count):
+
+                    uri = clip_data.getItemAt(i).getUri()
+
+                    path = self.copy_uri(uri, i)
+
+                    if path:
+                        paths.append(path)
+
+            else:
+
+                uri = intent.getData()
+
+                if uri is not None:
+                    path = self.copy_uri(uri, 0)
+
+                    if path:
+                        paths.append(path)
+
+            if paths:
+                self.callback(paths)
+
+        except Exception as e:
+
+            App.get_running_app().show_error(
+                "Image selection failed:\n" + str(e)
+            )
+
+        finally:
+
+            try:
+                self.activity.unbind(
+                    on_activity_result=self.on_activity_result
+                )
+            except Exception:
+                pass
+
+    def copy_uri(self, uri, index):
+
+        try:
+            from jnius import autoclass
+            import os
+            import uuid
+
+            PythonActivity = autoclass(
+                "org.kivy.android.PythonActivity"
+            )
+
+            activity = PythonActivity.mActivity
+
+            resolver = activity.getContentResolver()
+
+            stream = resolver.openInputStream(uri)
+
+            if stream is None:
+                return None
+
+            os.makedirs("input", exist_ok=True)
+
+            filename = (
+                "selected_"
+                + str(uuid.uuid4())
+                + ".jpg"
+            )
+
+            path = os.path.join(
+                "input",
+                filename
+            )
+
+            output = open(path, "wb")
+
+            buffer = bytearray(8192)
+
+            while True:
+
+                length = stream.read(buffer)
+
+                if length <= 0:
+                    break
+
+                output.write(
+                    bytes(buffer[:length])
+                )
+
+            output.close()
+            stream.close()
+
+            return path
+
+        except Exception:
+            return None
 
 
 class AIChat(BoxLayout):
