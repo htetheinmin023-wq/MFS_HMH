@@ -10,46 +10,249 @@ from kivy.uix.image import Image
 from kivy.uix.widget import Widget
 import os
 import shutil
+import time
 
 
-class ImagePicker(BoxLayout):
-    def __init__(self, title, callback, multi=False, **kwargs):
-        super().__init__(orientation="vertical", **kwargs)
+class ImagePicker:
+    def __init__(self, app, title, callback, multi=False):
+        self.app = app
         self.title = title
         self.callback = callback
         self.multi = multi
-        self.chooser = FileChooserIconView(
-            filters=["*.jpg", "*.jpeg", "*.png", "*.webp"],
-            multiselect=multi,
-        )
-        self.add_widget(self.chooser)
+        self.popup = None
+        self.chooser = None
+        self.request_code = 2301
 
     def open(self):
+        try:
+            from kivy.utils import platform
+            if platform == "android":
+                self._open_android()
+            else:
+                self._open_fallback()
+        except Exception as e:
+            self.app.show_error("Image picker failed:\n\n" + str(e))
+
+    def _open_android(self):
+        try:
+            from jnius import autoclass
+
+            PythonActivity = autoclass(
+                "org.kivy.android.PythonActivity"
+            )
+            Intent = autoclass("android.content.Intent")
+
+            activity = PythonActivity.mActivity
+
+            intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.setType("image/*")
+
+            if self.multi:
+                intent.putExtra(
+                    Intent.EXTRA_ALLOW_MULTIPLE,
+                    True
+                )
+
+            activity.bind(
+                on_activity_result=self._on_activity_result
+            )
+
+            activity.startActivityForResult(
+                intent,
+                self.request_code
+            )
+
+        except Exception as e:
+            self.app.show_error(
+                "Android image picker failed:\n\n" + str(e)
+            )
+
+    def _on_activity_result(self, request_code, result_code, intent):
+        if request_code != self.request_code:
+            return
+
+        try:
+            from jnius import autoclass
+
+            Activity = autoclass("android.app.Activity")
+
+            if result_code != Activity.RESULT_OK:
+                return
+
+            if intent is None:
+                return
+
+            paths = []
+            clip_data = intent.getClipData()
+
+            if clip_data is not None:
+                count = clip_data.getItemCount()
+
+                for i in range(count):
+                    uri = clip_data.getItemAt(i).getUri()
+                    path = self._copy_uri(uri, i)
+
+                    if path:
+                        paths.append(path)
+            else:
+                uri = intent.getData()
+
+                if uri is not None:
+                    path = self._copy_uri(uri, 0)
+
+                    if path:
+                        paths.append(path)
+
+            if not self.multi:
+                paths = paths[:1]
+
+            if not paths:
+                self.app.show_error(
+                    "ရွေးထားတဲ့ပုံကို မဖတ်နိုင်ပါ။"
+                )
+                return
+
+            self.callback(paths)
+
+        except Exception as e:
+            self.app.show_error(
+                "Image loading failed:\n\n" + str(e)
+            )
+
+    def _copy_uri(self, uri, index):
+        from jnius import autoclass
+
+        PythonActivity = autoclass(
+            "org.kivy.android.PythonActivity"
+        )
+
+        activity = PythonActivity.mActivity
+        resolver = activity.getContentResolver()
+        stream = resolver.openInputStream(uri)
+
+        if stream is None:
+            return None
+
+        os.makedirs(self.app.input_dir, exist_ok=True)
+
+        destination = os.path.join(
+            self.app.input_dir,
+            "selected_%d_%d.jpg"
+            % (int(time.time() * 1000), index)
+        )
+
+        output = open(destination, "wb")
+        buffer = bytearray(8192)
+
+        while True:
+            count = stream.read(buffer)
+
+            if count <= 0:
+                break
+
+            output.write(bytes(buffer[:count]))
+
+        output.close()
+        stream.close()
+
+        return destination
+
+    def _open_fallback(self):
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=8,
+            padding=8
+        )
+
+        self.chooser = FileChooserIconView(
+            filters=[
+                "*.jpg",
+                "*.jpeg",
+                "*.png",
+                "*.webp"
+            ],
+            multiselect=self.multi
+        )
+
+        layout.add_widget(self.chooser)
+
+        buttons = BoxLayout(
+            size_hint_y=None,
+            height=55,
+            spacing=8
+        )
+
+        select_button = Button(text="Select")
+        cancel_button = Button(text="Cancel")
+
+        select_button.bind(
+            on_press=self._fallback_select
+        )
+        cancel_button.bind(
+            on_press=self._close_fallback
+        )
+
+        buttons.add_widget(select_button)
+        buttons.add_widget(cancel_button)
+
+        layout.add_widget(buttons)
+
         self.popup = Popup(
             title=self.title,
-            content=self,
+            content=layout,
             size_hint=(0.95, 0.9),
+            auto_dismiss=False
         )
+
         self.popup.open()
 
-    def select(self):
+    def _fallback_select(self, instance):
         try:
             paths = list(self.chooser.selection)
+
             if not paths:
+                self.app.show_error("ပုံတစ်ပုံရွေးပေးပါ။")
                 return
-            os.makedirs("input", exist_ok=True)
+
             copied = []
-            for path in paths:
-                name = os.path.basename(path)
-                dest = os.path.join("input", name)
-                shutil.copy2(path, dest)
-                copied.append(dest)
-            self.popup.dismiss()
-            self.callback(copied)
-        except Exception as e:
-            App.get_running_app().show_error(
-                "Image selection failed:\\n" + str(e)
+
+            os.makedirs(
+                self.app.input_dir,
+                exist_ok=True
             )
+
+            for index, path in enumerate(paths):
+                extension = os.path.splitext(path)[1].lower()
+
+                if not extension:
+                    extension = ".jpg"
+
+                destination = os.path.join(
+                    self.app.input_dir,
+                    "selected_%d_%d%s"
+                    % (
+                        int(time.time() * 1000),
+                        index,
+                        extension
+                    )
+                )
+
+                shutil.copy2(path, destination)
+                copied.append(destination)
+
+            self._close_fallback()
+            self.callback(copied)
+
+        except Exception as e:
+            self.app.show_error(
+                "Image selection failed:\n\n" + str(e)
+            )
+
+    def _close_fallback(self, instance=None):
+        if self.popup is not None:
+            self.popup.dismiss()
+            self.popup = None
 
 class AIChat(BoxLayout):
 
@@ -124,8 +327,11 @@ class MFSApp(App):
 
     def build(self):
 
-        os.makedirs("input", exist_ok=True)
-        os.makedirs("output", exist_ok=True)
+        self.input_dir = os.path.join(os.getcwd(), "input")
+        self.output_dir = os.path.join(os.getcwd(), "output")
+
+        os.makedirs(self.input_dir, exist_ok=True)
+        os.makedirs(self.output_dir, exist_ok=True)
 
         self.show_menu()
 
@@ -194,6 +400,7 @@ class MFSApp(App):
     def choose_scan_image(self):
 
         picker = ImagePicker(
+            self,
             "Select Face Image",
             self.scan_selected
         )
@@ -225,6 +432,7 @@ class MFSApp(App):
     def choose_enhance_image(self):
 
         picker = ImagePicker(
+            self,
             "Select Image",
             self.enhance_selected
         )
@@ -256,6 +464,7 @@ class MFSApp(App):
     def choose_blend_images(self):
 
         picker = ImagePicker(
+            self,
             "Select 2 Images",
             self.blend_selected,
             multi=True
@@ -301,6 +510,7 @@ class MFSApp(App):
     def choose_swap_images(self):
 
         picker = ImagePicker(
+            self,
             "Select 2 Images for Face Swap",
             self.swap_selected,
             multi=True
