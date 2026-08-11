@@ -1,8 +1,6 @@
 .buildozer/
 python-for-android/
-.buildozer/
-
 __pycache__/
-main.py.backup
-main.py.before_lock
-main_backup.py
+*.pyc
+*.pyo
+*.log
