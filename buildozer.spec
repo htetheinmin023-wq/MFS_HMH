@@ -1,4 +1,5 @@
 [app]
+
 title = MFS HMH
 package.name = mfshmh
 package.domain = org.mfshmh
@@ -18,9 +19,9 @@ android.ndk = 25b
 android.ndk_api = 24
 android.sdk = 35
 android.accept_sdk_license = True
-
 android.archs = arm64-v8a
 
 [buildozer]
+
 log_level = 2
 warn_on_root = 1
