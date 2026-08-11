@@ -185,7 +185,11 @@ class MFSApp(App):
         layout.add_widget(btn4)
         layout.add_widget(btn5)
 
-        self.root = layout
+        if self.root is None:
+            self.root = layout
+        else:
+            self.root.clear_widgets()
+            self.root.add_widget(layout)
 
     def choose_scan_image(self):
 
@@ -389,7 +393,9 @@ class MFSApp(App):
 
     def show_ai_chat(self):
 
-        self.root = AIChat()
+        chat = AIChat()
+        self.root.clear_widgets()
+        self.root.add_widget(chat)
 
 
 if __name__ == "__main__":
