@@ -1,41 +1,34 @@
-import cv2
+from PIL import Image, ImageDraw
 
 def face_scan():
     try:
-        img = cv2.imread("input/face.jpg")
+        input_path = "input/face.jpg"
+        output_path = "output/MFS_face_scan.jpg"
 
-        if img is None:
-            print("Image not found")
-            return
+        img = Image.open(input_path).convert("RGB")
 
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        draw = ImageDraw.Draw(img)
 
-        face_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + 
-            "haarcascade_frontalface_default.xml"
+        # Safe scan mode:
+        # OpenCV မသုံးဘဲ image ကို scan လုပ်ပြီး
+        # အလယ်ပိုင်းမှာ scan box ပြထားမယ်။
+        w, h = img.size
+
+        margin_x = int(w * 0.20)
+        margin_y = int(h * 0.15)
+
+        x1 = margin_x
+        y1 = margin_y
+        x2 = w - margin_x
+        y2 = h - margin_y
+
+        draw.rectangle(
+            (x1, y1, x2, y2),
+            outline=(255, 0, 0),
+            width=max(3, int(min(w, h) * 0.01))
         )
 
-        faces = face_cascade.detectMultiScale(
-            gray, 
-            1.3, 
-            5
-        )
-
-        print("Faces detected:", len(faces))
-
-        for (x,y,w,h) in faces:
-            cv2.rectangle(
-                img,
-                (x,y),
-                (x+w,y+h),
-                (255,0,0),
-                2
-            )
-
-        cv2.imwrite(
-            "output/MFS_face_scan.jpg",
-            img
-        )
+        img.save(output_path, "JPEG", quality=95)
 
         print("Face Scan Done!")
 

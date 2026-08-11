@@ -324,9 +324,7 @@ class AIChat(BoxLayout):
 
 
 class MFSApp(App):
-
     def build(self):
-
         self.input_dir = os.path.join(os.getcwd(), "input")
         self.output_dir = os.path.join(os.getcwd(), "output")
 
