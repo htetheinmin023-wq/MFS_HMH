@@ -11,6 +11,16 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+      - name: Maximize build space
+        # OpenCV + numpy are compiled from source (each ~5-10 GB of
+        # build artifacts); the stock runner disk runs out without this.
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 4096
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -31,6 +41,14 @@ jobs:
       - name: Accept Android licenses
         run: |
           yes | sdkmanager --licenses || true
+
+      - name: Install build dependencies
+        # The p4a OpenCV recipe compiles OpenCV from source with CMake;
+        # the retry loop below re-runs the whole build when a download
+        # fails, so the native toolchain must be present up front.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config unzip
 
       - name: Install Android SDK packages
         run: |

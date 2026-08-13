@@ -1,4 +1,5 @@
 from kivy.app import App
+from kivy.clock import Clock
 from kivy.uix.button import Button
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.label import Label
@@ -7,13 +8,25 @@ from kivy.uix.scrollview import ScrollView
 from kivy.uix.filechooser import FileChooserIconView
 from kivy.uix.popup import Popup
 from kivy.uix.image import Image
-from kivy.uix.widget import Widget
+from kivy.utils import platform
+import json
 import os
 import shutil
+import threading
 import time
+
+from modules.ai_chat import (
+    AIClient,
+    DEFAULT_BASE_URL,
+    DEFAULT_MODEL,
+    SYSTEM_PROMPT,
+    detect_action,
+)
 
 
 class ImagePicker:
+    _next_request_code = 2301
+
     def __init__(self, app, title, callback, multi=False):
         self.app = app
         self.title = title
@@ -21,11 +34,12 @@ class ImagePicker:
         self.multi = multi
         self.popup = None
         self.chooser = None
-        self.request_code = 2301
+        self.request_code = ImagePicker._next_request_code
+        ImagePicker._next_request_code += 1
+        self._bound = False
 
     def open(self):
         try:
-            from kivy.utils import platform
             if platform == "android":
                 self._open_android()
             else:
@@ -34,49 +48,71 @@ class ImagePicker:
             self.app.show_error("Image picker failed:\n\n" + str(e))
 
     def _open_android(self):
-        try:
-            from jnius import autoclass
+        from android import activity
+        from jnius import autoclass
 
-            PythonActivity = autoclass(
-                "org.kivy.android.PythonActivity"
+        PythonActivity = autoclass(
+            "org.kivy.android.PythonActivity"
+        )
+        Intent = autoclass("android.content.Intent")
+
+        act = PythonActivity.mActivity
+
+        intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+        intent.addCategory(Intent.CATEGORY_OPENABLE)
+        intent.setType("image/*")
+
+        if self.multi:
+            intent.putExtra(
+                Intent.EXTRA_ALLOW_MULTIPLE,
+                True
             )
-            Intent = autoclass("android.content.Intent")
 
-            activity = PythonActivity.mActivity
-
-            intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
-            intent.addCategory(Intent.CATEGORY_OPENABLE)
-            intent.setType("image/*")
-
-            if self.multi:
-                intent.putExtra(
-                    Intent.EXTRA_ALLOW_MULTIPLE,
-                    True
-                )
-
+        # p4a official API: the android.activity module dispatches
+        # on_activity_result to Python callbacks. Bind only once per
+        # picker so repeated picks do not stack duplicate listeners.
+        if not self._bound:
             activity.bind(
                 on_activity_result=self._on_activity_result
             )
+            self._bound = True
 
-            activity.startActivityForResult(
-                intent,
-                self.request_code
-            )
-
-        except Exception as e:
-            self.app.show_error(
-                "Android image picker failed:\n\n" + str(e)
-            )
+        act.startActivityForResult(
+            intent,
+            self.request_code
+        )
 
     def _on_activity_result(self, request_code, result_code, intent):
         if request_code != self.request_code:
             return
 
+        # The Java callback arrives on the Android UI thread. Move the
+        # rest of the handling to the Kivy main-loop thread before
+        # touching any Kivy widgets (Kivy is not thread-safe).
+        Clock.schedule_once(
+            lambda dt: self._handle_result(result_code, intent), 0
+        )
+
+    def _handle_result(self, result_code, intent):
         try:
+            try:
+                from android.activity import unbind
+            except Exception:
+                unbind = None
+
+            # Unbind once so repeated picks do not stack listeners.
+            if self._bound:
+                if unbind is not None:
+                    unbind(
+                        on_activity_result=self._on_activity_result
+                    )
+                self._bound = False
+
             from jnius import autoclass
 
             Activity = autoclass("android.app.Activity")
 
+            # User pressed Cancel / Back — safe no-op.
             if result_code != Activity.RESULT_OK:
                 return
 
@@ -138,7 +174,7 @@ class ImagePicker:
 
         destination = os.path.join(
             self.app.input_dir,
-            "selected_%d_%d.jpg"
+            "selected_%d_%d.img"
             % (int(time.time() * 1000), index)
         )
 
@@ -254,9 +290,10 @@ class ImagePicker:
             self.popup.dismiss()
             self.popup = None
 
+
 class AIChat(BoxLayout):
 
-    def __init__(self, **kwargs):
+    def __init__(self, app, **kwargs):
         super().__init__(
             orientation="vertical",
             spacing=8,
@@ -264,8 +301,20 @@ class AIChat(BoxLayout):
             **kwargs
         )
 
+        self.app = app
+        self.history = [
+            {"role": "system", "content": SYSTEM_PROMPT}
+        ]
+        self._busy = False
+
         self.chat = Label(
-            text="HMH AI\n\nမင်္ဂလာပါ။ ဘာမေးချင်လဲ?",
+            text=(
+                "HMH AI\n\n"
+                "မင်္ဂလာပါ။ ဘာမေးချင်လဲ?\n\n"
+                "AI မသုံးခင် Settings မှာ "
+                "API key ထည့်ပေးပါ။\n"
+                "(Free key: Google AI Studio သို့မဟုတ် Groq)"
+            ),
             size_hint_y=None,
             halign="left",
             valign="top"
@@ -275,9 +324,36 @@ class AIChat(BoxLayout):
             texture_size=self.chat.setter("size")
         )
 
-        scroll = ScrollView()
-        scroll.add_widget(self.chat)
-        self.add_widget(scroll)
+        # Wrap long lines inside the scroll area.
+        self.chat.bind(
+            width=lambda *a:
+            setattr(
+                self.chat,
+                "text_size",
+                (self.chat.width, None)
+            )
+        )
+
+        self.scroll = ScrollView()
+        self.scroll.add_widget(self.chat)
+        self.add_widget(self.scroll)
+
+        # Quick-action row (AI Agent): appears when the AI detects
+        # that the user is asking for an app feature.
+        self.action_box = BoxLayout(
+            size_hint_y=None,
+            height=0,
+            spacing=5
+        )
+
+        self.add_widget(self.action_box)
+
+        self.actions = {
+            "scan": ("Face Scan", self.app.choose_scan_image),
+            "enhance": ("Face Enhance", self.app.choose_enhance_image),
+            "blend": ("Face Blend", self.app.choose_blend_images),
+            "swap": ("Face Swap", self.app.choose_swap_images),
+        }
 
         self.input_box = TextInput(
             hint_text="Ask anything...",
@@ -294,49 +370,298 @@ class AIChat(BoxLayout):
             spacing=5
         )
 
-        send = Button(text="Send")
-        back = Button(text="Back")
+        self.send_btn = Button(text="Send")
+        image_btn = Button(text="Image")
+        video_btn = Button(text="Video")
+        settings_btn = Button(text="Settings")
+        back_btn = Button(text="Back")
 
-        send.bind(on_press=self.send_message)
-        back.bind(
-            on_press=lambda x:
-            App.get_running_app().show_menu()
+        self.send_btn.bind(on_press=self.send_message)
+        image_btn.bind(on_press=self.attach_image)
+        video_btn.bind(on_press=self.attach_video)
+        settings_btn.bind(
+            on_press=lambda x: self.app.show_chat_settings()
         )
+        back_btn.bind(on_press=lambda x: self.app.show_menu())
 
-        buttons.add_widget(send)
-        buttons.add_widget(back)
+        buttons.add_widget(self.send_btn)
+        buttons.add_widget(image_btn)
+        buttons.add_widget(video_btn)
+        buttons.add_widget(settings_btn)
+        buttons.add_widget(back_btn)
 
         self.add_widget(buttons)
 
+    def _scroll_bottom(self):
+        Clock.schedule_once(
+            lambda dt: setattr(self.scroll, "scroll_y", 0)
+        )
+
+    def _append_chat(self, text):
+        self.chat.text += text
+        self._scroll_bottom()
+
+    def attach_image(self, instance):
+        self._append_chat(
+            "\n\nHMH AI: ပုံရွေးရန် ဖွင့်နေပါသည်..."
+        )
+
+        picker = ImagePicker(
+            self.app,
+            "Attach Image",
+            self._image_attached
+        )
+
+        picker.open()
+
+    def _image_attached(self, paths):
+        name = os.path.basename(paths[0])
+
+        self._append_chat(
+            "\n\nImage ပူးတွဲထားသည်: %s\n"
+            "(ဤဗားရှင်းတွင် ပုံကို AI သို့ မပို့သေးပါ)" % name
+        )
+
+    def attach_video(self, instance):
+        self._append_chat(
+            "\n\nVideo: ဤဗားရှင်းတွင် "
+            "ဗီဒီယို ပူးတွဲ၍ မရနိုင်သေးပါ။"
+        )
+
     def send_message(self, instance):
+        if self._busy:
+            return
 
         message = self.input_box.text.strip()
 
         if not message:
             return
 
-        self.chat.text += (
-            f"\n\nYou: {message}"
-            "\n\nHMH AI: Demo Mode"
+        self.input_box.text = ""
+
+        self._append_chat("\n\nYou: " + message)
+        self.history.append(
+            {"role": "user", "content": message}
         )
 
-        self.input_box.text = ""
+        # Keep context small: system prompt + last 8 messages.
+        if len(self.history) > 9:
+            self.history = [self.history[0]] + self.history[-8:]
+
+        action = detect_action(message)
+
+        if action is not None:
+            self._offer_action(action)
+        else:
+            self._ask_ai()
+
+    def _offer_action(self, action):
+        """AI Agent: the AI found an app-feature request — offer a
+        one-tap button to run it (user confirms before executing)."""
+        label, callback = self.actions[action]
+
+        run_btn = Button(text="▶ Run: " + label)
+        run_btn.bind(on_press=lambda x: callback())
+
+        self.action_box.clear_widgets()
+        self.action_box.height = 55
+        self.action_box.add_widget(run_btn)
+
+        self._append_chat(
+            "\n\nHMH AI: လုပ်ဆောင်ချက် တွေ့ပါပြီ — "
+            "အောက်က ခလုတ်ကို နှိပ်ပါ။"
+        )
+
+    def _ask_ai(self):
+        self._busy = True
+        self.send_btn.disabled = True
+
+        self._append_chat("\n\nHMH AI: စဉ်းစားနေပါသည်...")
+
+        messages = list(self.history)
+
+        thread = threading.Thread(
+            target=self._ai_worker,
+            args=(messages,),
+            daemon=True
+        )
+
+        thread.start()
+
+    def _ai_worker(self, messages):
+        try:
+            client = self.app.get_ai_client()
+            reply = client.chat(messages)
+            Clock.schedule_once(
+                lambda dt: self._finish_reply(reply, None)
+            )
+        except Exception as e:
+            Clock.schedule_once(
+                lambda dt: self._finish_reply(None, str(e))
+            )
+
+    def _finish_reply(self, reply, error):
+        self._busy = False
+        self.send_btn.disabled = False
+
+        marker = "\n\nHMH AI: စဉ်းစားနေပါသည်..."
+
+        if self.chat.text.endswith(marker):
+            self.chat.text = self.chat.text[: -len(marker)]
+
+        if reply:
+            self.history.append(
+                {"role": "assistant", "content": reply}
+            )
+            self._append_chat("\n\nHMH AI: " + reply)
+        else:
+            self._append_chat("\n\nHMH AI: " + error)
+
+
+class ChatSettings(BoxLayout):
+
+    def __init__(self, app, **kwargs):
+        super().__init__(
+            orientation="vertical",
+            spacing=8,
+            padding=10,
+            **kwargs
+        )
+
+        self.app = app
+        config = app.get_chat_config()
+
+        title = Label(
+            text="HMH AI Settings",
+            font_size=20,
+            size_hint_y=None,
+            height=40
+        )
+
+        self.add_widget(title)
+
+        info = Label(
+            text=(
+                "OpenAI-compatible API ဖြစ်ပါတယ်။\n"
+                "Free key ရနိုင်တဲ့နေရာ:\n"
+                "- Google AI Studio (Gemini)\n"
+                "- Groq (Llama)\n"
+                "Base URL / Key / Model ပြောင်းလို့ရပါတယ်။"
+            ),
+            size_hint_y=None,
+            height=120,
+            halign="left",
+            valign="top"
+        )
+
+        info.bind(
+            width=lambda *a:
+            setattr(info, "text_size", (info.width, None))
+        )
+
+        self.add_widget(info)
+
+        self.base_url_input = TextInput(
+            text=config["base_url"],
+            hint_text="Base URL",
+            size_hint_y=None,
+            height=60
+        )
+
+        self.api_key_input = TextInput(
+            text=config["api_key"],
+            hint_text="API Key",
+            password=True,
+            size_hint_y=None,
+            height=60
+        )
+
+        self.model_input = TextInput(
+            text=config["model"],
+            hint_text="Model",
+            size_hint_y=None,
+            height=60
+        )
+
+        self.add_widget(self.base_url_input)
+        self.add_widget(self.api_key_input)
+        self.add_widget(self.model_input)
+
+        buttons = BoxLayout(
+            size_hint_y=None,
+            height=55,
+            spacing=5
+        )
+
+        save_btn = Button(text="Save")
+        back_btn = Button(text="Back")
+
+        save_btn.bind(on_press=self._save)
+        back_btn.bind(on_press=lambda x: self.app.show_ai_chat())
+
+        buttons.add_widget(save_btn)
+        buttons.add_widget(back_btn)
+
+        self.add_widget(buttons)
+
+    def _save(self, instance):
+        config = {
+            "base_url": self.base_url_input.text.strip(),
+            "api_key": self.api_key_input.text.strip(),
+            "model": self.model_input.text.strip(),
+        }
+
+        try:
+            self.app.save_chat_config(config)
+            self.app.show_ai_chat()
+        except Exception as e:
+            self.app.show_error(
+                "Settings သိမ်းလို့မရပါ:\n\n" + str(e)
+            )
 
 
 class MFSApp(App):
-    def build(self):
-        self.input_dir = os.path.join(os.getcwd(), "input")
-        self.output_dir = os.path.join(os.getcwd(), "output")
 
-        os.makedirs(self.input_dir, exist_ok=True)
-        os.makedirs(self.output_dir, exist_ok=True)
+    def build(self):
+        self._setup_dirs()
+
+        # Single persistent root — screens swap inside it.
+        # (Kivy only attaches the root widget to the window once.)
+        self.root = BoxLayout()
+
+        # Android Back button returns to the main menu instead of
+        # quitting from inside a feature screen.
+        from kivy.core.window import Window
+
+        Window.bind(on_keyboard=self._on_keyboard)
 
         self.show_menu()
 
         return self.root
 
-    def show_menu(self):
+    def _setup_dirs(self):
+        base = self.user_data_dir
+        self.input_dir = os.path.join(base, "input")
+        self.output_dir = os.path.join(base, "output")
 
+        os.makedirs(self.input_dir, exist_ok=True)
+        os.makedirs(self.output_dir, exist_ok=True)
+
+    def _set_screen(self, widget):
+        self._in_menu = False
+        self.root.clear_widgets()
+        self.root.add_widget(widget)
+
+    def _on_keyboard(self, window, key, scancode, codepoint, modifiers):
+        # Android Back button (keycode 27): return to the main menu.
+        # On the main menu itself, let the system handle Back (exit).
+        if key == 27 and platform == "android":
+            if not getattr(self, "_in_menu", False):
+                self.show_menu()
+                return True
+        return False
+
+    def show_menu(self):
         layout = BoxLayout(
             orientation="vertical",
             spacing=10,
@@ -352,51 +677,62 @@ class MFSApp(App):
 
         layout.add_widget(title)
 
-        btn1 = Button(text="1. Face Scan")
-        btn2 = Button(text="2. Face Enhance")
-        btn3 = Button(text="3. Face Blend")
-        btn4 = Button(text="4. Face Swap")
-        btn5 = Button(text="5. HMH AI Chat")
+        buttons = [
+            ("1. Face Scan", self.choose_scan_image),
+            ("2. Face Enhance", self.choose_enhance_image),
+            ("3. Face Blend", self.choose_blend_images),
+            ("4. Face Swap", self.choose_swap_images),
+            ("5. HMH AI Chat", self.show_ai_chat),
+            ("6. Exit", self.exit_app),
+        ]
 
-        btn1.bind(
-            on_press=lambda x:
-            self.choose_scan_image()
+        for text, callback in buttons:
+            button = Button(
+                text=text,
+                size_hint_y=None,
+                height=55
+            )
+
+            button.bind(
+                on_press=lambda x, cb=callback: cb()
+            )
+
+            layout.add_widget(button)
+
+        self._set_screen(layout)
+        self._in_menu = True
+
+    def exit_app(self):
+        self.stop()
+
+    # ---- processing helpers ----
+
+    def _run_async(self, status_text, worker, *args):
+        """Run image processing off the UI thread."""
+        self._show_status(status_text)
+
+        thread = threading.Thread(
+            target=self._worker_wrapper,
+            args=(worker, args),
+            daemon=True
         )
 
-        btn2.bind(
-            on_press=lambda x:
-            self.choose_enhance_image()
-        )
+        thread.start()
 
-        btn3.bind(
-            on_press=lambda x:
-            self.choose_blend_images()
-        )
+    def _worker_wrapper(self, worker, args):
+        try:
+            out_path, title = worker(*args)
+            Clock.schedule_once(
+                lambda dt: self.show_result(out_path, title)
+            )
+        except Exception as e:
+            Clock.schedule_once(
+                lambda dt: self.show_error(str(e))
+            )
 
-        btn4.bind(
-            on_press=lambda x:
-            self.choose_swap_images()
-        )
-
-        btn5.bind(
-            on_press=lambda x:
-            self.show_ai_chat()
-        )
-
-        layout.add_widget(btn1)
-        layout.add_widget(btn2)
-        layout.add_widget(btn3)
-        layout.add_widget(btn4)
-        layout.add_widget(btn5)
-
-        if self.root is None:
-            self.root = layout
-        else:
-            self.root.clear_widgets()
-            self.root.add_widget(layout)
+    # ---- Face Scan ----
 
     def choose_scan_image(self):
-
         picker = ImagePicker(
             self,
             "Select Face Image",
@@ -406,29 +742,36 @@ class MFSApp(App):
         picker.open()
 
     def scan_selected(self, paths):
+        if not paths:
+            return
 
-        try:
+        input_path = os.path.join(
+            self.input_dir, "face.jpg"
+        )
+        output_path = os.path.join(
+            self.output_dir, "MFS_face_scan.jpg"
+        )
 
-            shutil.copy(
-                paths[0],
-                "input/face.jpg"
-            )
+        self._run_async(
+            "Face Scan လုပ်နေပါသည်...",
+            self._scan_worker,
+            paths[0],
+            input_path,
+            output_path
+        )
 
-            from modules.face_scan import face_scan
+    def _scan_worker(self, src, input_path, output_path):
+        shutil.copy(src, input_path)
 
-            face_scan()
+        from modules.face_scan import face_scan
 
-            self.show_result(
-                "output/MFS_face_scan.jpg",
-                "Face Scan Result"
-            )
+        face_scan(input_path, output_path)
 
-        except Exception as e:
+        return output_path, "Face Scan Result"
 
-            self.show_error(str(e))
+    # ---- Face Enhance ----
 
     def choose_enhance_image(self):
-
         picker = ImagePicker(
             self,
             "Select Image",
@@ -438,32 +781,39 @@ class MFSApp(App):
         picker.open()
 
     def enhance_selected(self, paths):
+        if not paths:
+            return
 
-        try:
+        input_path = os.path.join(
+            self.input_dir, "face.jpg"
+        )
+        output_path = os.path.join(
+            self.output_dir, "MFS_face_enhanced.jpg"
+        )
 
-            shutil.copy(
-                paths[0],
-                "input/face.jpg"
-            )
+        self._run_async(
+            "Face Enhance လုပ်နေပါသည်...",
+            self._enhance_worker,
+            paths[0],
+            input_path,
+            output_path
+        )
 
-            from modules.face_enhance import face_enhance
+    def _enhance_worker(self, src, input_path, output_path):
+        shutil.copy(src, input_path)
 
-            face_enhance()
+        from modules.face_enhance import face_enhance
 
-            self.show_result(
-                "output/MFS_face_enhanced.jpg",
-                "Face Enhance Result"
-            )
+        face_enhance(input_path, output_path)
 
-        except Exception as e:
+        return output_path, "Face Enhance Result"
 
-            self.show_error(str(e))
+    # ---- Face Blend ----
 
     def choose_blend_images(self):
-
         picker = ImagePicker(
             self,
-            "Select 2 Images",
+            "Select 2 Images for Blend",
             self.blend_selected,
             multi=True
         )
@@ -471,42 +821,41 @@ class MFSApp(App):
         picker.open()
 
     def blend_selected(self, paths):
-
         if len(paths) < 2:
-
-            self.show_error(
-                "ပုံ ၂ ပုံရွေးပေးပါ။"
-            )
-
+            self.show_error("ပုံ ၂ ပုံရွေးပေးပါ။")
             return
 
-        try:
+        input1 = os.path.join(self.input_dir, "face1.jpg")
+        input2 = os.path.join(self.input_dir, "face2.jpg")
+        output_path = os.path.join(
+            self.output_dir, "MFS_blend_result.jpg"
+        )
 
-            shutil.copy(
-                paths[0],
-                "input/face1.jpg"
-            )
+        self._run_async(
+            "Face Blend လုပ်နေပါသည်...",
+            self._blend_worker,
+            paths[0],
+            paths[1],
+            input1,
+            input2,
+            output_path
+        )
 
-            shutil.copy(
-                paths[1],
-                "input/face2.jpg"
-            )
+    def _blend_worker(
+        self, src1, src2, input1, input2, output_path
+    ):
+        shutil.copy(src1, input1)
+        shutil.copy(src2, input2)
 
-            from modules.face_blend import face_blend
+        from modules.face_blend import face_blend
 
-            face_blend()
+        face_blend(input1, input2, output_path)
 
-            self.show_result(
-                "output/MFS_blend_result.jpg",
-                "Face Blend Result"
-            )
+        return output_path, "Face Blend Result"
 
-        except Exception as e:
-
-            self.show_error(str(e))
+    # ---- Face Swap ----
 
     def choose_swap_images(self):
-
         picker = ImagePicker(
             self,
             "Select 2 Images for Face Swap",
@@ -517,42 +866,114 @@ class MFSApp(App):
         picker.open()
 
     def swap_selected(self, paths):
-
         if len(paths) < 2:
-
             self.show_error(
                 "Face Swap အတွက် ပုံ ၂ ပုံရွေးပေးပါ။"
             )
-
             return
 
-        self.show_error(
-            "Face Swap module မရှိသေးပါ။\n"
-            "အခု Button ကို ထည့်ပြီးပါပြီ။"
+        input1 = os.path.join(self.input_dir, "face1.jpg")
+        input2 = os.path.join(self.input_dir, "face2.jpg")
+        output_path = os.path.join(
+            self.output_dir, "MFS_face_swapped.jpg"
         )
 
-    def show_result(self, path, title):
+        self._run_async(
+            "Face Swap လုပ်နေပါသည်...",
+            self._swap_worker,
+            paths[0],
+            paths[1],
+            input1,
+            input2,
+            output_path
+        )
 
+    def _swap_worker(
+        self, src1, src2, input1, input2, output_path
+    ):
+        shutil.copy(src1, input1)
+        shutil.copy(src2, input2)
+
+        from modules.face_swap import face_swap
+
+        face_swap(input1, input2, output_path)
+
+        return output_path, "Face Swap Result"
+
+    # ---- HMH AI Chat ----
+
+    def show_ai_chat(self):
+        self._set_screen(AIChat(self))
+
+    def get_chat_config(self):
+        path = os.path.join(
+            self.user_data_dir, "chat_config.json"
+        )
+
+        default = {
+            "base_url": DEFAULT_BASE_URL,
+            "api_key": "",
+            "model": DEFAULT_MODEL,
+        }
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+
+            merged = dict(default)
+            merged.update(config)
+            return merged
+        except Exception:
+            return default
+
+    def save_chat_config(self, config):
+        path = os.path.join(
+            self.user_data_dir, "chat_config.json"
+        )
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(
+                config,
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
+
+    def get_ai_client(self):
+        config = self.get_chat_config()
+
+        return AIClient(
+            config["base_url"],
+            config["api_key"],
+            config["model"]
+        )
+
+    def show_chat_settings(self):
+        self._set_screen(ChatSettings(self))
+
+    # ---- screens ----
+
+    def show_result(self, path, title):
         layout = BoxLayout(
             orientation="vertical",
             spacing=10,
             padding=10
         )
 
+        heading = Label(
+            text=title,
+            font_size=18,
+            size_hint_y=None,
+            height=40
+        )
+
+        layout.add_widget(heading)
+
         if os.path.exists(path):
-
-            image = Image(
-                source=path
-            )
-
-            layout.add_widget(image)
-
+            layout.add_widget(Image(source=path))
         else:
-
             layout.add_widget(
-                Label(
-                    text="Result file မတွေ့ပါ။"
-                )
+                Label(text="Result file မတွေ့ပါ။")
             )
 
         back = Button(
@@ -561,51 +982,44 @@ class MFSApp(App):
             height=55
         )
 
-        back.bind(
-            on_press=lambda x:
-            self.show_menu()
-        )
+        back.bind(on_press=lambda x: self.show_menu())
 
         layout.add_widget(back)
 
-        self.root = layout
+        self._set_screen(layout)
 
     def show_error(self, message):
-
         layout = BoxLayout(
             orientation="vertical",
             spacing=10,
             padding=10
         )
 
-        layout.add_widget(
-            Label(
-                text=message
-            )
-        )
+        layout.add_widget(Label(text=message))
 
-        back = Button(
+        ok = Button(
             text="OK",
             size_hint_y=None,
             height=55
         )
 
-        back.bind(
-            on_press=lambda x:
-            self.show_menu()
+        ok.bind(on_press=lambda x: self.show_menu())
+
+        layout.add_widget(ok)
+
+        self._set_screen(layout)
+
+    def _show_status(self, text):
+        layout = BoxLayout(
+            orientation="vertical",
+            spacing=10,
+            padding=20
         )
 
-        layout.add_widget(back)
+        layout.add_widget(Label(text=text))
 
-        self.root = layout
-
-    def show_ai_chat(self):
-
-        chat = AIChat()
-        self.root.clear_widgets()
-        self.root.add_widget(chat)
+        self._set_screen(layout)
 
 
 if __name__ == "__main__":
-
     MFSApp().run()
