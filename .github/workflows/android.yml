@@ -83,6 +83,8 @@ jobs:
               "https://files.pythonhosted.org/",
               "https://github.com",
               "https://dl.google.com/android/repository/repository2-1.xml",
+              "https://download.savannah.gnu.org/releases/freetype/freetype-2.14.1.tar.gz",
+              "https://sourceforge.net/projects/freetype/files/freetype2/2.14.1/freetype-2.14.1.tar.gz/download",
           ]
           for u in urls:
               try:
@@ -93,8 +95,29 @@ jobs:
           EOF
 
       - name: Build APK
+        # freetype (Pillow's C dependency) is fetched by python-for-android
+        # from download.savannah.gnu.org, which returns a persistent 502 to
+        # the runner (all 5 attempts of run 55 died there). Pre-place the
+        # identical tarball from the official SourceForge mirror into p4a's
+        # package cache each attempt so p4a skips its own download.
         run: |
+          FT_DIR=.buildozer/android/platform/build-arm64-v8a/packages/freetype
+          FT_FILE=freetype-2.14.1.tar.gz
           for i in 1 2 3 4 5; do
+            mkdir -p "$FT_DIR"
+            if [ ! -f "$FT_DIR/$FT_FILE" ]; then
+              echo "Pre-fetching $FT_FILE from SourceForge mirror..."
+              for url in \
+                "https://sourceforge.net/projects/freetype/files/freetype2/2.14.1/freetype-2.14.1.tar.gz/download" \
+                "https://download.savannah.gnu.org/releases/freetype/freetype-2.14.1.tar.gz"; do
+                if curl -fL --retry 5 --connect-timeout 30 -o "$FT_DIR/$FT_FILE" "$url"; then
+                  echo "OK: $url"
+                  break
+                fi
+                echo "FAILED: $url"
+              done
+              ls -la "$FT_DIR"
+            fi
             if buildozer android debug; then
               exit 0
             fi
