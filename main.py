@@ -1,6 +1,7 @@
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.text import LabelBase
+from kivy.logger import Logger
 from kivy.uix.button import Button
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.label import Label
@@ -50,6 +51,36 @@ from modules.ai_chat import (
 class ImagePicker:
     _next_request_code = 2301
 
+    # MIME type -> file extension map, used when the content provider
+    # does not return a usable DISPLAY_NAME (or the name has no ext).
+    _MIME_EXT = {
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/png": ".png",
+        "image/x-png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+        "image/bmp": ".bmp",
+        "image/x-bmp": ".bmp",
+        "image/heic": ".heic",
+        "image/heif": ".heif",
+        "image/avif": ".avif",
+    }
+
+    # Extensions we trust from DISPLAY_NAME (anything else falls back
+    # to the MIME map, then to ".jpg").
+    _SAFE_EXT = {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".gif",
+        ".bmp",
+        ".heic",
+        ".heif",
+        ".avif",
+    }
+
     def __init__(self, app, title, callback, multi=False):
         self.app = app
         self.title = title
@@ -71,6 +102,15 @@ class ImagePicker:
             self.app.show_error("Image picker failed:\n\n" + str(e))
 
     def _open_android(self):
+        """Launch the system image picker.
+
+        - API 33+: Android Photo Picker (ACTION_PICK_IMAGES) — the
+          modern system picker. No storage permission needed; the app
+          only ever sees content:// URIs and copies from them.
+        - API 24–32: ACTION_GET_CONTENT with image/* — the classic,
+          universally-supported fallback (safe picker, no
+          READ_EXTERNAL_STORAGE required on 24–32 either).
+        """
         from android import activity
         from jnius import autoclass
 
@@ -78,17 +118,46 @@ class ImagePicker:
             "org.kivy.android.PythonActivity"
         )
         Intent = autoclass("android.content.Intent")
+        Build = autoclass("android.os.Build")
 
         act = PythonActivity.mActivity
+        sdk_int = Build.VERSION.SDK_INT
+        Logger.info(
+            "picker: _open_android api=%d multi=%s",
+            sdk_int,
+            self.multi,
+        )
 
-        intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
-        intent.addCategory(Intent.CATEGORY_OPENABLE)
-        intent.setType("image/*")
+        if sdk_int >= 33:
+            MediaStore = autoclass("android.provider.MediaStore")
+            intent = Intent(MediaStore.ACTION_PICK_IMAGES)
 
-        if self.multi:
-            intent.putExtra(
-                Intent.EXTRA_ALLOW_MULTIPLE,
-                True
+            if self.multi:
+                intent.putExtra(
+                    MediaStore.EXTRA_PICK_IMAGES_MAX,
+                    20,
+                )
+
+            Logger.info(
+                "picker: api>=33 -> Photo Picker "
+                "(ACTION_PICK_IMAGES, max=%s)",
+                20 if self.multi else 1,
+            )
+        else:
+            intent = Intent(Intent.ACTION_GET_CONTENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.setType("image/*")
+
+            if self.multi:
+                intent.putExtra(
+                    Intent.EXTRA_ALLOW_MULTIPLE,
+                    True,
+                )
+
+            Logger.info(
+                "picker: api<33 -> ACTION_GET_CONTENT image/* "
+                "(multi=%s)",
+                self.multi,
             )
 
         # p4a official API: the android.activity module dispatches
@@ -105,8 +174,24 @@ class ImagePicker:
             self.request_code
         )
 
+        Logger.info(
+            "picker: startActivityForResult code=%d sent",
+            self.request_code,
+        )
+
     def _on_activity_result(self, request_code, result_code, intent):
+        Logger.info(
+            "picker: on_activity_result code=%d result=%d intent=%s",
+            request_code,
+            result_code,
+            intent is not None,
+        )
+
         if request_code != self.request_code:
+            Logger.warning(
+                "picker: ignoring result for foreign request %d",
+                request_code,
+            )
             return
 
         # The Java callback arrives on the Android UI thread. Move the
@@ -137,9 +222,11 @@ class ImagePicker:
 
             # User pressed Cancel / Back — safe no-op.
             if result_code != Activity.RESULT_OK:
+                Logger.info("picker: user canceled (result=%s)", result_code)
                 return
 
             if intent is None:
+                Logger.warning("picker: RESULT_OK but intent is None")
                 return
 
             paths = []
@@ -147,15 +234,18 @@ class ImagePicker:
 
             if clip_data is not None:
                 count = clip_data.getItemCount()
+                Logger.info("picker: clip_data items=%d", count)
 
                 for i in range(count):
                     uri = clip_data.getItemAt(i).getUri()
+                    Logger.info("picker: copying item %d uri=%s", i, uri)
                     path = self._copy_uri(uri, i)
 
                     if path:
                         paths.append(path)
             else:
                 uri = intent.getData()
+                Logger.info("picker: single uri=%s", uri)
 
                 if uri is not None:
                     path = self._copy_uri(uri, 0)
@@ -172,12 +262,70 @@ class ImagePicker:
                 )
                 return
 
+            Logger.info("picker: %d file(s) ready: %s", len(paths), paths)
             self.callback(paths)
 
         except Exception as e:
+            Logger.error("picker: result handling failed: %s", e)
             self.app.show_error(
                 "Image loading failed:\n\n" + str(e)
             )
+
+    def _resolve_extension(self, uri, resolver):
+        """Pick a real file extension for a picked URI.
+
+        Order: DISPLAY_NAME extension -> MIME type -> ".jpg".
+        Returns a string starting with a dot, e.g. ".jpg".
+        """
+        from jnius import autoclass
+
+        OpenableColumns = autoclass(
+            "android.provider.OpenableColumns"
+        )
+
+        # 1) DISPLAY_NAME
+        try:
+            cursor = resolver.query(
+                uri,
+                [OpenableColumns.DISPLAY_NAME],
+                None,
+                None,
+                None,
+            )
+            if cursor is not None and cursor.moveToFirst():
+                name = cursor.getString(0)
+                ext = os.path.splitext(name or "")[1].lower()
+
+                if ext in self._SAFE_EXT:
+                    Logger.info(
+                        "picker: ext via DISPLAY_NAME '%s' -> %s",
+                        name,
+                        ext,
+                    )
+                    return ext
+            if cursor is not None:
+                cursor.close()
+        except Exception as e:
+            Logger.warning(
+                "picker: DISPLAY_NAME lookup failed: %s", e
+            )
+
+        # 2) MIME type
+        try:
+            mime = resolver.getType(uri) or ""
+            ext = self._MIME_EXT.get(mime.lower())
+
+            if ext:
+                Logger.info("picker: ext via MIME '%s' -> %s", mime, ext)
+                return ext
+
+            Logger.warning("picker: unmapped MIME '%s'", mime)
+        except Exception as e:
+            Logger.warning("picker: MIME lookup failed: %s", e)
+
+        # 3) fallback
+        Logger.warning("picker: no extension resolvable, using .jpg")
+        return ".jpg"
 
     def _copy_uri(self, uri, index):
         from jnius import autoclass
@@ -191,14 +339,17 @@ class ImagePicker:
         stream = resolver.openInputStream(uri)
 
         if stream is None:
+            Logger.error("picker: openInputStream returned None for %s", uri)
             return None
 
         os.makedirs(self.app.input_dir, exist_ok=True)
 
+        extension = self._resolve_extension(uri, resolver)
+
         destination = os.path.join(
             self.app.input_dir,
-            "selected_%d_%d.img"
-            % (int(time.time() * 1000), index)
+            "selected_%d_%d%s"
+            % (int(time.time() * 1000), index, extension)
         )
 
         output = open(destination, "wb")
@@ -214,6 +365,10 @@ class ImagePicker:
 
         output.close()
         stream.close()
+
+        Logger.info(
+            "picker: copied %s -> %s", uri, destination
+        )
 
         return destination
 
