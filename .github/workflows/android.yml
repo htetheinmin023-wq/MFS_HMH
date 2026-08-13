@@ -9,10 +9,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    # PyPI's files.pythonhosted.org was returning 502 for the runner's
-    # android-wheel downloads; use a mirror CDN instead.
+    # PyPI's files.pythonhosted.org intermittently returns 502 for the
+    # runner's pip downloads (runs 50-54). Mirror CDN + generous pip
+    # retry/timeout keep pip-mediated downloads resilient.
     env:
       PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+      PIP_RETRIES: 10
+      PIP_TIMEOUT: 60
 
     steps:
       - name: Checkout
@@ -37,9 +40,8 @@ jobs:
           yes | sdkmanager --licenses || true
 
       - name: Install build dependencies
-        # The p4a OpenCV recipe compiles OpenCV from source with CMake;
-        # the retry loop below re-runs the whole build when a download
-        # fails, so the native toolchain must be present up front.
+        # Native toolchain for any recipe that compiles C/C++ from source
+        # (e.g. p4a recipes pulling CMake/ninja builds).
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build pkg-config unzip
@@ -56,20 +58,49 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
 
+      - name: Cache pip + buildozer
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            .buildozer
+          key: ${{ runner.os }}-p4a-${{ hashFiles('buildozer.spec') }}
+
       - name: Install Buildozer
         run: |
           python -m pip install --upgrade pip
           pip install buildozer==1.6.0 cython==0.29.37
 
+      - name: Network diagnostics
+        # Probes every host the build depends on; if the build fails again
+        # the failing host is visible right here instead of a 403-gated log.
+        run: |
+          python - <<'EOF'
+          import urllib.request
+          urls = [
+              "https://mirrors.aliyun.com/pypi/simple/",
+              "https://pypi.org/simple/",
+              "https://files.pythonhosted.org/",
+              "https://github.com",
+              "https://dl.google.com/android/repository/repository2-1.xml",
+          ]
+          for u in urls:
+              try:
+                  code = urllib.request.urlopen(u, timeout=20).status
+                  print(f"OK  {code}  {u}")
+              except Exception as e:
+                  print(f"FAIL {u}  {e}")
+          EOF
+
       - name: Build APK
         run: |
-          for i in 1 2 3; do
+          for i in 1 2 3 4 5; do
             if buildozer android debug; then
               exit 0
             fi
             echo "Build attempt $i failed. Retrying..."
             rm -rf .buildozer/android/platform/build-arm64-v8a/packages
-            sleep 20
+            sleep 30
           done
           exit 1
 
