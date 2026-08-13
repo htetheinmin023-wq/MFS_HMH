@@ -1,5 +1,6 @@
 from kivy.app import App
 from kivy.clock import Clock
+from kivy.core.text import LabelBase
 from kivy.uix.button import Button
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.label import Label
@@ -14,6 +15,28 @@ import os
 import shutil
 import threading
 import time
+
+# ---------------------------------------------------------------------------
+# Myanmar (Burmese) font support
+#
+# The whole UI is in Burmese, but Kivy's bundled default font (Roboto)
+# contains NO Myanmar glyphs, and Kivy on Android does NOT automatically
+# fall back to the system fonts. Without this the app opens with every
+# label/button rendered as blank/tofu boxes and appears completely
+# unusable. Registering under the name "Roboto" makes ALL widgets
+# (Label/Button/TextInput) use the bundled Noto Sans Myanmar font by
+# default, since every widget defaults to font_name="Roboto".
+# ---------------------------------------------------------------------------
+_FONT_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "assets",
+    "fonts",
+)
+LabelBase.register(
+    name="Roboto",
+    fn_regular=os.path.join(_FONT_DIR, "NotoSansMyanmar-Regular.ttf"),
+    fn_bold=os.path.join(_FONT_DIR, "NotoSansMyanmar-Bold.ttf"),
+)
 
 from modules.ai_chat import (
     AIClient,

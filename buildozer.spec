@@ -6,7 +6,9 @@ package.domain = org.mfshmh
 version = 1.0
 
 source.dir = .
-source.include_exts = py,png,jpg,jpeg,kv,atlas,xml
+# ttf included: app bundles Noto Sans Myanmar for the Burmese UI
+# (Kivy's default Roboto has no Myanmar glyphs -> blank text on device)
+source.include_exts = py,png,jpg,jpeg,kv,atlas,xml,ttf
 
 # numpy/opencv intentionally NOT included: p4a master builds Python 3.14
 # host + numpy 2.3.0 has no cp314 wheels -> source compile fails
