@@ -40,11 +40,12 @@ jobs:
           yes | sdkmanager --licenses || true
 
       - name: Install build dependencies
-        # Native toolchain for any recipe that compiles C/C++ from source
-        # (e.g. p4a recipes pulling CMake/ninja builds).
+        # Native toolchain for p4a recipes: cmake/ninja for C builds,
+        # libtool for recipes that run autogen.sh/autoreconf (libffi fails
+        # with "LT_SYS_SYMBOL_USCORE undefined" without it - run 56).
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build pkg-config unzip
+          sudo apt-get install -y cmake ninja-build pkg-config unzip libtool
 
       - name: Install Android SDK packages
         run: |
