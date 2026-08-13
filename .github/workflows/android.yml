@@ -40,12 +40,13 @@ jobs:
           yes | sdkmanager --licenses || true
 
       - name: Install build dependencies
-        # Native toolchain for p4a recipes: cmake/ninja for C builds,
-        # libtool for recipes that run autogen.sh/autoreconf (libffi fails
-        # with "LT_SYS_SYMBOL_USCORE undefined" without it - run 56).
+        # Native toolchain for p4a recipes: cmake/ninja for C builds;
+        # libltdl-dev provides /usr/share/aclocal/libltdl.m4 which defines
+        # the LT_SYS_SYMBOL_USCORE macro - libffi's autogen.sh/autoreconf
+        # fails without it (p4a recipe docstring, runs 56-57).
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build pkg-config unzip libtool
+          sudo apt-get install -y cmake ninja-build pkg-config unzip libtool libltdl-dev
 
       - name: Install Android SDK packages
         run: |
