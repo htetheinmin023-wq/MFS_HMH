@@ -8,7 +8,11 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    # PyPI's files.pythonhosted.org was returning 502 for the runner's
+    # android-wheel downloads; use a mirror CDN instead.
+    env:
+      PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
 
     steps:
       - name: Checkout
