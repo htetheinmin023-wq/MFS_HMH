@@ -8,7 +8,11 @@ version = 1.0
 source.dir = .
 source.include_exts = py,png,jpg,jpeg,kv,atlas,xml
 
-requirements = python3,kivy,pillow,numpy,opencv
+# numpy/opencv intentionally NOT included: p4a master builds Python 3.14
+# host + numpy 2.3.0 has no cp314 wheels -> source compile fails
+# (known broken combo). The app degrades gracefully to the verified
+# PIL fallbacks when cv2 is unavailable.
+requirements = python3,kivy,pillow
 
 orientation = portrait
 fullscreen = 0
