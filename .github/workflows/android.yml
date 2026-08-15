@@ -49,15 +49,20 @@ jobs:
           sudo apt-get install -y cmake ninja-build pkg-config unzip libtool libltdl-dev
 
       - name: Install Android SDK packages
-        # Run 60/62 failed 5x in Build APK with "Requested API target 35 is
-        # not available" - the platforms;android-35 install had silently not
-        # landed. Verify the platform is complete and retry before moving on.
-        # Run 63: buildozer picked the legacy $ANDROID_SDK_ROOT/tools/bin/
-        # sdkmanager which crashes on Java 17 (javax.xml.bind removed).
-        # The legacy tools/ dir is deprecated since 2019 - remove it so
-        # buildozer resolves the modern cmdline-tools sdkmanager (in PATH).
+        # Runs 60/62: "Requested API target 35 is not available" - the
+        # platforms;android-35 install had silently not landed, and the
+        # platform dir is verified + retried below before moving on.
+        # Run 63: buildozer probed the legacy $ANDROID_SDK_ROOT/tools/bin/
+        # sdkmanager, which crashes on Java 17 (javax.xml.bind removed).
+        # Run 64: removing tools/ made buildozer report "sdkmanager is not
+        # installed" - buildozer 1.6.0 only probes that exact path.
+        # Fix: replace the legacy sdkmanager with a wrapper that delegates
+        # to the modern cmdline-tools sdkmanager (Java 17 compatible).
         run: |
-          rm -rf "$ANDROID_SDK_ROOT/tools"
+          mkdir -p "$ANDROID_SDK_ROOT/tools/bin"
+          printf '#!/bin/sh\nexec /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager "$@"\n' > "$ANDROID_SDK_ROOT/tools/bin/sdkmanager"
+          chmod +x "$ANDROID_SDK_ROOT/tools/bin/sdkmanager"
+          "$ANDROID_SDK_ROOT/tools/bin/sdkmanager" --version >/dev/null
           sdkmanager "platform-tools"
           sdkmanager "build-tools;35.0.0"
           for i in 1 2 3; do
