@@ -49,12 +49,15 @@ jobs:
           sudo apt-get install -y cmake ninja-build pkg-config unzip libtool libltdl-dev
 
       - name: Install Android SDK packages
-        # Run 60 failed 5x in Build APK with "Requested API target 35 is
-        # not available" - the platforms;android-35 install had silently
-        # not landed. Verify the platform directory exists and retry the
-        # install before moving on, so a flaky sdkmanager call can never
-        # waste the whole 5x build retry loop again.
+        # Run 60/62 failed 5x in Build APK with "Requested API target 35 is
+        # not available" - the platforms;android-35 install had silently not
+        # landed. Verify the platform is complete and retry before moving on.
+        # Run 63: buildozer picked the legacy $ANDROID_SDK_ROOT/tools/bin/
+        # sdkmanager which crashes on Java 17 (javax.xml.bind removed).
+        # The legacy tools/ dir is deprecated since 2019 - remove it so
+        # buildozer resolves the modern cmdline-tools sdkmanager (in PATH).
         run: |
+          rm -rf "$ANDROID_SDK_ROOT/tools"
           sdkmanager "platform-tools"
           sdkmanager "build-tools;35.0.0"
           for i in 1 2 3; do
@@ -73,6 +76,9 @@ jobs:
           echo "ANDROIDSDK=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
+          # Modern sdkmanager for buildozer/p4a subprocesses (legacy
+          # tools/bin/sdkmanager is removed in the SDK packages step).
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
 
       - name: Cache pip + buildozer
         uses: actions/cache@v4
