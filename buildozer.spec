@@ -28,7 +28,12 @@ android.api = 35
 android.minapi = 24
 android.ndk = 25b
 android.ndk_api = 24
-android.sdk = 35
+# android.sdk is deprecated + ignored by buildozer 1.6.0. Without
+# android.sdk_path buildozer downloads its OWN SDK (commandline tools
+# only) and p4a dies with "Requested API target 35 is not available"
+# (CI runs 60, 62). Point at the GitHub-hosted runner's SDK, which the
+# CI workflow explicitly installs + verifies platforms;android-35 into.
+android.sdk_path = /usr/local/lib/android/sdk
 android.accept_sdk_license = True
 android.archs = arm64-v8a
 android.permissions = INTERNET
