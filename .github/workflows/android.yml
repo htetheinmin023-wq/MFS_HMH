@@ -9,10 +9,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    # PyPI's files.pythonhosted.org was returning 502 for the runner's
-    # android-wheel downloads; use a mirror CDN instead.
+    # PyPI's files.pythonhosted.org intermittently returns 502 for the
+    # runner's pip downloads (runs 50-54). Mirror CDN + generous pip
+    # retry/timeout keep pip-mediated downloads resilient.
     env:
       PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+      PIP_RETRIES: 10
+      PIP_TIMEOUT: 60
 
     steps:
       - name: Checkout
@@ -37,12 +40,13 @@ jobs:
           yes | sdkmanager --licenses || true
 
       - name: Install build dependencies
-        # The p4a OpenCV recipe compiles OpenCV from source with CMake;
-        # the retry loop below re-runs the whole build when a download
-        # fails, so the native toolchain must be present up front.
+        # Native toolchain for p4a recipes: cmake/ninja for C builds;
+        # libltdl-dev provides /usr/share/aclocal/libltdl.m4 which defines
+        # the LT_SYS_SYMBOL_USCORE macro - libffi's autogen.sh/autoreconf
+        # fails without it (p4a recipe docstring, runs 56-57).
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build pkg-config unzip
+          sudo apt-get install -y cmake ninja-build pkg-config unzip libtool libltdl-dev
 
       - name: Install Android SDK packages
         run: |
@@ -56,20 +60,72 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
 
+      - name: Cache pip + buildozer
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            .buildozer
+          key: ${{ runner.os }}-p4a-${{ hashFiles('buildozer.spec') }}
+
       - name: Install Buildozer
         run: |
           python -m pip install --upgrade pip
           pip install buildozer==1.6.0 cython==0.29.37
 
-      - name: Build APK
+      - name: Network diagnostics
+        # Probes every host the build depends on; if the build fails again
+        # the failing host is visible right here instead of a 403-gated log.
         run: |
-          for i in 1 2 3; do
+          python - <<'EOF'
+          import urllib.request
+          urls = [
+              "https://mirrors.aliyun.com/pypi/simple/",
+              "https://pypi.org/simple/",
+              "https://files.pythonhosted.org/",
+              "https://github.com",
+              "https://dl.google.com/android/repository/repository2-1.xml",
+              "https://download.savannah.gnu.org/releases/freetype/freetype-2.14.1.tar.gz",
+              "https://sourceforge.net/projects/freetype/files/freetype2/2.14.1/freetype-2.14.1.tar.gz/download",
+          ]
+          for u in urls:
+              try:
+                  code = urllib.request.urlopen(u, timeout=20).status
+                  print(f"OK  {code}  {u}")
+              except Exception as e:
+                  print(f"FAIL {u}  {e}")
+          EOF
+
+      - name: Build APK
+        # freetype (Pillow's C dependency) is fetched by python-for-android
+        # from download.savannah.gnu.org, which returns a persistent 502 to
+        # the runner (all 5 attempts of run 55 died there). Pre-place the
+        # identical tarball from the official SourceForge mirror into p4a's
+        # package cache each attempt so p4a skips its own download.
+        run: |
+          FT_DIR=.buildozer/android/platform/build-arm64-v8a/packages/freetype
+          FT_FILE=freetype-2.14.1.tar.gz
+          for i in 1 2 3 4 5; do
+            mkdir -p "$FT_DIR"
+            if [ ! -f "$FT_DIR/$FT_FILE" ]; then
+              echo "Pre-fetching $FT_FILE from SourceForge mirror..."
+              for url in \
+                "https://sourceforge.net/projects/freetype/files/freetype2/2.14.1/freetype-2.14.1.tar.gz/download" \
+                "https://download.savannah.gnu.org/releases/freetype/freetype-2.14.1.tar.gz"; do
+                if curl -fL --retry 5 --connect-timeout 30 -o "$FT_DIR/$FT_FILE" "$url"; then
+                  echo "OK: $url"
+                  break
+                fi
+                echo "FAILED: $url"
+              done
+              ls -la "$FT_DIR"
+            fi
             if buildozer android debug; then
               exit 0
             fi
             echo "Build attempt $i failed. Retrying..."
             rm -rf .buildozer/android/platform/build-arm64-v8a/packages
-            sleep 20
+            sleep 30
           done
           exit 1
 
