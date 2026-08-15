@@ -49,10 +49,24 @@ jobs:
           sudo apt-get install -y cmake ninja-build pkg-config unzip libtool libltdl-dev
 
       - name: Install Android SDK packages
+        # Run 60 failed 5x in Build APK with "Requested API target 35 is
+        # not available" - the platforms;android-35 install had silently
+        # not landed. Verify the platform directory exists and retry the
+        # install before moving on, so a flaky sdkmanager call can never
+        # waste the whole 5x build retry loop again.
         run: |
           sdkmanager "platform-tools"
-          sdkmanager "platforms;android-35"
           sdkmanager "build-tools;35.0.0"
+          for i in 1 2 3; do
+            sdkmanager "platforms;android-35"
+            if [ -d "$ANDROID_SDK_ROOT/platforms/android-35" ]; then
+              echo "OK: platforms;android-35 installed"
+              break
+            fi
+            echo "WARN: platforms/android-35 not found after install (attempt $i) - retrying"
+            sleep 10
+          done
+          [ -d "$ANDROID_SDK_ROOT/platforms/android-35" ] || { echo "FAIL: platforms;android-35 still missing"; exit 1; }
 
       - name: Set Android environment
         run: |
