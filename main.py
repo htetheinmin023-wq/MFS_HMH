@@ -14,8 +14,10 @@ from kivy.utils import platform
 import json
 import os
 import shutil
+import sys
 import threading
 import time
+import traceback
 
 # ---------------------------------------------------------------------------
 # Myanmar (Burmese) font support
@@ -46,6 +48,57 @@ from modules.ai_chat import (
     SYSTEM_PROMPT,
     detect_action,
 )
+
+
+def _crash_hook(*args):
+    """Global safety net: any uncaught Python exception is logged and
+    shown in-app instead of silently closing the app on Android.
+
+    Handles both sys.excepthook (exc_type, exc_value, exc_tb) and
+    threading.excepthook (single args object with those 3 fields).
+    """
+    try:
+        if len(args) == 3:
+            exc_type, exc_value, exc_tb = args
+        else:
+            exc_type = args[0].exc_type
+            exc_value = args[0].exc_value
+            exc_tb = args[0].exc_traceback
+
+        tb = "".join(
+            traceback.format_exception(exc_type, exc_value, exc_tb)
+        )
+        Logger.exception("Uncaught exception: %s", exc_value)
+
+        from kivy.app import App
+
+        app = App.get_running_app()
+
+        if app is None:
+            return
+
+        try:
+            log_path = os.path.join(app.user_data_dir, "crash.log")
+
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(tb + "\n")
+        except Exception:
+            pass
+
+        Clock.schedule_once(
+            lambda dt: app.show_error(
+                "မမျှော်လင့်ထားတဲ့ အမှားတစ်ခု ဖြစ်ခဲ့ပါတယ်။\n\n"
+                + tb[:1500]
+            )
+        )
+    except Exception:
+        pass
+
+
+sys.excepthook = _crash_hook
+
+if hasattr(threading, "excepthook"):
+    threading.excepthook = _crash_hook
 
 
 class ImagePicker:
@@ -118,10 +171,12 @@ class ImagePicker:
             "org.kivy.android.PythonActivity"
         )
         Intent = autoclass("android.content.Intent")
-        Build = autoclass("android.os.Build")
+        # VERSION is a nested class — pyjnius needs the "$" form.
+        # Build.VERSION raises "no attribute 'VERSION'" on Android.
+        BuildVersion = autoclass("android.os.Build$VERSION")
 
         act = PythonActivity.mActivity
-        sdk_int = Build.VERSION.SDK_INT
+        sdk_int = BuildVersion.SDK_INT
         Logger.info(
             "picker: _open_android api=%d multi=%s",
             sdk_int,
@@ -1081,7 +1136,11 @@ class MFSApp(App):
     # ---- HMH AI Chat ----
 
     def show_ai_chat(self):
-        self._set_screen(AIChat(self))
+        try:
+            self._set_screen(AIChat(self))
+        except Exception as e:
+            Logger.exception("AI chat screen failed to open")
+            self.show_error("AI Chat ဖွင့်လို့မရပါ:\n\n" + str(e))
 
     def get_chat_config(self):
         path = os.path.join(
@@ -1127,7 +1186,11 @@ class MFSApp(App):
         )
 
     def show_chat_settings(self):
-        self._set_screen(ChatSettings(self))
+        try:
+            self._set_screen(ChatSettings(self))
+        except Exception as e:
+            Logger.exception("AI chat settings screen failed to open")
+            self.show_error("Settings ဖွင့်လို့မရပါ:\n\n" + str(e))
 
     # ---- screens ----
 
