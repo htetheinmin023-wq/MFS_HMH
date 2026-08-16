@@ -729,8 +729,13 @@ class AIChat(BoxLayout):
                 lambda dt: self._finish_reply(reply, None)
             )
         except Exception as e:
+            # Capture the message eagerly: the exception variable is
+            # cleared when the except block exits, so a lazy str(e)
+            # inside the Clock lambda raises UnboundLocalError later
+            # (which crashes the whole app on Android).
+            error = str(e)
             Clock.schedule_once(
-                lambda dt: self._finish_reply(None, str(e))
+                lambda dt: self._finish_reply(None, error)
             )
 
     def _finish_reply(self, reply, error):
@@ -959,8 +964,11 @@ class MFSApp(App):
                 lambda dt: self.show_result(out_path, title)
             )
         except Exception as e:
+            # Eager capture — lazy str(e) in the Clock lambda would
+            # raise UnboundLocalError later and crash the app.
+            error = str(e)
             Clock.schedule_once(
-                lambda dt: self.show_error(str(e))
+                lambda dt: self.show_error(error)
             )
 
     # ---- Face Scan ----
