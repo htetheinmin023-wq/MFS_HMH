@@ -284,36 +284,65 @@ class ImagePicker:
                 Logger.warning("picker: RESULT_OK but intent is None")
                 return
 
-            paths = []
+            uris = []
+            seen = set()
+
+            def add_uri(uri):
+                """Collect one picked URI (dedup by URI string)."""
+                if uri is None:
+                    return
+
+                key = uri.toString()
+
+                if key in seen:
+                    Logger.info("picker: skip duplicate uri=%s", key)
+                    return
+
+                seen.add(key)
+                uris.append(uri)
+
+            # Android quirk: multi-select pickers (GET_CONTENT with
+            # EXTRA_ALLOW_MULTIPLE, and the Photo Picker) may put the
+            # FIRST uri in intent.getData() and the REST in ClipData
+            # (some devices) — or everything in ClipData (others).
+            # Handle BOTH sources and dedupe so no image is dropped.
             clip_data = intent.getClipData()
+
+            add_uri(intent.getData())
 
             if clip_data is not None:
                 count = clip_data.getItemCount()
                 Logger.info("picker: clip_data items=%d", count)
 
                 for i in range(count):
-                    uri = clip_data.getItemAt(i).getUri()
-                    Logger.info("picker: copying item %d uri=%s", i, uri)
-                    path = self._copy_uri(uri, i)
-
-                    if path:
-                        paths.append(path)
-            else:
-                uri = intent.getData()
-                Logger.info("picker: single uri=%s", uri)
-
-                if uri is not None:
-                    path = self._copy_uri(uri, 0)
-
-                    if path:
-                        paths.append(path)
+                    add_uri(clip_data.getItemAt(i).getUri())
 
             if not self.multi:
-                paths = paths[:1]
+                uris = uris[:1]
+
+            paths = []
+
+            for index, uri in enumerate(uris):
+                Logger.info(
+                    "picker: copying item %d uri=%s", index, uri
+                )
+                path = self._copy_uri(uri, index)
+
+                if path:
+                    paths.append(path)
 
             if not paths:
                 self.app.show_error(
                     "ရွေးထားတဲ့ပုံကို မဖတ်နိုင်ပါ။"
+                )
+                return
+
+            if self.multi and len(paths) < 2:
+                self.app.show_error(
+                    "ပုံ ၂ ပုံ ရွေးပေးပါ။\n"
+                    "ပုံတွေကို ဖိနှိပ်ပြီး (long-press) "
+                    "သို့မဟုတ် အမှတ်ခြစ်ပြီး "
+                    "၂ ပုံရွေးပါ။"
                 )
                 return
 
