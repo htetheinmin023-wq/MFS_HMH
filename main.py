@@ -185,18 +185,60 @@ class ImagePicker:
 
         if sdk_int >= 33:
             MediaStore = autoclass("android.provider.MediaStore")
-            intent = Intent(MediaStore.ACTION_PICK_IMAGES)
+
+            try:
+                intent = Intent(MediaStore.ACTION_PICK_IMAGES)
+
+                if self.multi:
+                    intent.putExtra(
+                        MediaStore.EXTRA_PICK_IMAGES_MAX,
+                        20,
+                    )
+
+                Logger.info(
+                    "picker: api>=33 -> Photo Picker "
+                    "(ACTION_PICK_IMAGES, max=%s)",
+                    20 if self.multi else 1,
+                )
+
+                act.startActivityForResult(
+                    intent,
+                    self.request_code,
+                )
+
+                # Successfully launched the system Photo Picker.
+                self._bound = self._bind_listener()
+                Logger.info(
+                    "picker: Photo Picker launched code=%d",
+                    self.request_code,
+                )
+                return
+            except Exception as e:
+                # Some Android 13+ devices/ROMs do not ship the Photo
+                # Picker module (ActivityNotFoundException). Fall back
+                # to the classic GET_CONTENT picker — universally
+                # supported and works on every device.
+                Logger.warning(
+                    "picker: Photo Picker unavailable (%s) -> "
+                    "falling back to GET_CONTENT",
+                    e,
+                )
+
+            # Fall through to GET_CONTENT (also for API < 33).
+            intent = Intent(Intent.ACTION_GET_CONTENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.setType("image/*")
 
             if self.multi:
                 intent.putExtra(
-                    MediaStore.EXTRA_PICK_IMAGES_MAX,
-                    20,
+                    Intent.EXTRA_ALLOW_MULTIPLE,
+                    True,
                 )
 
             Logger.info(
-                "picker: api>=33 -> Photo Picker "
-                "(ACTION_PICK_IMAGES, max=%s)",
-                20 if self.multi else 1,
+                "picker: fallback -> ACTION_GET_CONTENT image/* "
+                "(multi=%s)",
+                self.multi,
             )
         else:
             intent = Intent(Intent.ACTION_GET_CONTENT)
@@ -218,11 +260,7 @@ class ImagePicker:
         # p4a official API: the android.activity module dispatches
         # on_activity_result to Python callbacks. Bind only once per
         # picker so repeated picks do not stack duplicate listeners.
-        if not self._bound:
-            activity.bind(
-                on_activity_result=self._on_activity_result
-            )
-            self._bound = True
+        self._bound = self._bind_listener()
 
         act.startActivityForResult(
             intent,
@@ -233,6 +271,18 @@ class ImagePicker:
             "picker: startActivityForResult code=%d sent",
             self.request_code,
         )
+
+    def _bind_listener(self):
+        """Bind the on_activity_result listener (once per picker)."""
+        from android import activity
+
+        if not self._bound:
+            activity.bind(
+                on_activity_result=self._on_activity_result
+            )
+            return True
+
+        return True
 
     def _on_activity_result(self, request_code, result_code, intent):
         Logger.info(
@@ -1079,16 +1129,33 @@ class MFSApp(App):
         return output_path, "Face Enhance Result"
 
     # ---- Face Blend ----
+    #
+    # Blend/Swap use TWO sequential SINGLE picks instead of one
+    # multi-select pick. Multi-select pickers (Photo Picker extra,
+    # GET_CONTENT EXTRA_ALLOW_MULTIPLE) behave differently per
+    # device/ROM and some simply do not open or do not support
+    # multi-select. Sequential single picks work on every Android
+    # device (single pick already proven working).
 
     def choose_blend_images(self):
-        picker = ImagePicker(
-            self,
-            "Select 2 Images for Blend",
-            self.blend_selected,
-            multi=True
-        )
+        self._blend_pending = []
+        self._pick_blend_next("Select Image 1/2 for Blend")
 
+    def _pick_blend_next(self, title):
+        picker = ImagePicker(self, title, self._blend_picked, multi=False)
         picker.open()
+
+    def _blend_picked(self, paths):
+        if not paths:
+            return
+
+        self._blend_pending.append(paths[0])
+
+        if len(self._blend_pending) >= 2:
+            self.blend_selected(list(self._blend_pending))
+            return
+
+        self._pick_blend_next("Select Image 2/2 for Blend")
 
     def blend_selected(self, paths):
         if len(paths) < 2:
@@ -1126,14 +1193,24 @@ class MFSApp(App):
     # ---- Face Swap ----
 
     def choose_swap_images(self):
-        picker = ImagePicker(
-            self,
-            "Select 2 Images for Face Swap",
-            self.swap_selected,
-            multi=True
-        )
+        self._swap_pending = []
+        self._pick_swap_next("Select Image 1/2 for Face Swap")
 
+    def _pick_swap_next(self, title):
+        picker = ImagePicker(self, title, self._swap_picked, multi=False)
         picker.open()
+
+    def _swap_picked(self, paths):
+        if not paths:
+            return
+
+        self._swap_pending.append(paths[0])
+
+        if len(self._swap_pending) >= 2:
+            self.swap_selected(list(self._swap_pending))
+            return
+
+        self._pick_swap_next("Select Image 2/2 for Face Swap")
 
     def swap_selected(self, paths):
         if len(paths) < 2:
