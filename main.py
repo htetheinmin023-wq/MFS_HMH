@@ -97,8 +97,221 @@ def _crash_hook(*args):
 
 sys.excepthook = _crash_hook
 
-if hasattr(threading, "excepthook"):
-    threading.excepthook = _crash_hook
+
+# Unique file-name stamp: time_ms + monotonic counter. The counter
+# guards against two picks landing in the same millisecond (sequential
+# single picks, fast devices) overwriting each other's file.
+_copy_seq = [0]
+_copy_seq_lock = threading.Lock()
+
+
+def _unique_stamp():
+    with _copy_seq_lock:
+        _copy_seq[0] += 1
+        return "%d_%d" % (int(time.time() * 1000), _copy_seq[0])
+
+
+class _PickerBridge:
+    """App-lifetime singleton that owns the Android on_activity_result
+    listener and routes results to in-flight ImagePicker requests.
+
+    Design:
+    - The listener is bound exactly ONCE at app startup and never
+      unbound, so there is no window where an activity result can
+      arrive without a Python listener (the old per-picker bind /
+      unbind design could lose results).
+    - launch() registers the picker BEFORE startActivityForResult, so
+      a result cannot slip in before registration.
+    - If a result still arrives before registration (instant picker
+      answers), it is buffered and delivered right after registration
+      (lost-result recovery).
+    - on_resume triggers a recovery scan: a pending picker that
+      regained the foreground without a result is marked lost.
+    - Every request_code is consumed at most once (duplicate callback
+      protection), and URI copying runs on a background worker thread
+      so the UI thread never blocks.
+    """
+
+    STATUS_IDLE = "idle"
+    STATUS_PENDING = "pending"
+    STATUS_RESULT = "result"
+    STATUS_COPYING = "copying"
+    STATUS_DONE = "done"
+    STATUS_ERROR = "error"
+    STATUS_LOST = "lost"
+    STATUS_CANCELED = "canceled"
+
+    _instance = None
+
+    @classmethod
+    def get(cls, app=None):
+        if cls._instance is None:
+            cls._instance = cls()
+        if app is not None:
+            cls._instance.app = app
+        return cls._instance
+
+    def __init__(self):
+        self.app = None
+        self._bound = False
+        self._pending = {}     # request_code -> ImagePicker
+        self._buffer = {}      # request_code -> (result_code, intent)
+        self._handled = set()  # request codes consumed (dup protection)
+
+    # ---- app-lifetime listener ----
+
+    def bind(self):
+        """Bind the on_activity_result / on_resume listeners exactly
+        once for the whole app lifetime (idempotent)."""
+        if self._bound:
+            return True
+
+        try:
+            from android import activity
+
+            activity.bind(
+                on_activity_result=self._on_activity_result
+            )
+            activity.bind(on_resume=self._on_resume)
+            self._bound = True
+            Logger.info("picker_bridge: app-lifetime listener bound")
+        except Exception as e:
+            # Desktop / non-Android runtime: no bridge available; the
+            # ImagePicker falls back to the FileChooser path.
+            Logger.error("picker_bridge: bind failed: %s", e)
+            self._bound = False
+
+        return self._bound
+
+    # ---- launch / routing ----
+
+    def launch(self, picker, request_code, intent):
+        """Register the picker BEFORE launching the system picker, then
+        deliver any result that arrived early (lost-result recovery)."""
+        from jnius import autoclass
+
+        PythonActivity = autoclass(
+            "org.kivy.android.PythonActivity"
+        )
+
+        if request_code in self._pending:
+            Logger.warning(
+                "picker_bridge: request %d already pending",
+                request_code,
+            )
+
+        self._pending[request_code] = picker
+        self._handled.discard(request_code)
+        picker._set_status(self.STATUS_PENDING)
+
+        act = PythonActivity.mActivity
+        act.startActivityForResult(intent, request_code)
+
+        Logger.info(
+            "picker_bridge: launched code=%d status=%s",
+            request_code,
+            picker.status,
+        )
+
+        # Lost-result recovery: deliver a result that arrived before
+        # this registration (buffered by _route).
+        self._deliver_buffered(request_code)
+
+    def _route(self, request_code, result_code, intent):
+        """Kivy-thread entry: route an activity result to its picker."""
+        if request_code in self._handled:
+            Logger.warning(
+                "picker_bridge: duplicate result code=%d ignored",
+                request_code,
+            )
+            return
+
+        picker = self._pending.get(request_code)
+
+        if picker is None:
+            # Result arrived before the picker registered — buffer it;
+            # launch() delivers it immediately after registering
+            # (lost-result recovery for the launch race).
+            self._buffer[request_code] = (result_code, intent)
+            Logger.info(
+                "picker_bridge: buffered early result code=%d result=%d",
+                request_code,
+                result_code,
+            )
+            return
+
+        # Duplicate callback protection: consume this code once.
+        self._handled.add(request_code)
+        self._buffer.pop(request_code, None)
+
+        picker._on_bridge_result(result_code, intent)
+
+    def _deliver_buffered(self, request_code):
+        """Lost-result recovery: hand a buffered early result to its
+        picker now that the picker has registered."""
+        item = self._buffer.pop(request_code, None)
+
+        if item is None:
+            return
+
+        if request_code in self._handled:
+            Logger.info(
+                "picker_bridge: buffered result code=%d already handled",
+                request_code,
+            )
+            return
+
+        self._handled.add(request_code)
+        picker = self._pending.get(request_code)
+
+        if picker is None:
+            return
+
+        result_code, intent = item
+        Logger.info(
+            "picker_bridge: recovered buffered result code=%d",
+            request_code,
+        )
+        Clock.schedule_once(
+            lambda dt: picker._on_bridge_result(result_code, intent), 0
+        )
+
+    def _on_activity_result(self, request_code, result_code, intent):
+        """Java/UI-thread callback — marshal to the Kivy thread."""
+        Clock.schedule_once(
+            lambda dt: self._route(request_code, result_code, intent), 0
+        )
+
+    def _on_resume(self):
+        """Android on_resume — schedule the lost-result recovery scan."""
+        Clock.schedule_once(lambda dt: self._scan_lost(), 1.5)
+
+    def _scan_lost(self):
+        """Lost-result recovery: any pending picker that regained the
+        foreground without a result is stuck — mark it lost."""
+        final = (
+            self.STATUS_DONE,
+            self.STATUS_ERROR,
+            self.STATUS_LOST,
+            self.STATUS_CANCELED,
+        )
+
+        for code, picker in list(self._pending.items()):
+            if code in self._handled:
+                continue
+
+            if picker.status in final:
+                continue
+
+            Logger.warning(
+                "picker_bridge: request %d lost (no result on resume)",
+                code,
+            )
+            picker._mark_lost()
+
+    def forget(self, request_code):
+        """Remove a finished picker from the pending registry."""
+        self._pending.pop(request_code, None)
 
 
 class ImagePicker:
@@ -143,7 +356,22 @@ class ImagePicker:
         self.chooser = None
         self.request_code = ImagePicker._next_request_code
         ImagePicker._next_request_code += 1
-        self._bound = False
+        self.status = _PickerBridge.STATUS_IDLE
+        self.status_log = [self.status]
+        self._bridge = _PickerBridge.get(app)
+        self._copy_thread = None
+
+    # ---- result-status flow ----
+
+    def _set_status(self, status):
+        """Advance this request's status (result-status flow)."""
+        self.status = status
+        self.status_log.append(status)
+        Logger.info(
+            "picker_bridge: status=%s code=%d",
+            status,
+            self.request_code,
+        )
 
     def open(self):
         try:
@@ -152,6 +380,7 @@ class ImagePicker:
             else:
                 self._open_fallback()
         except Exception as e:
+            self._set_status(_PickerBridge.STATUS_ERROR)
             self.app.show_error("Image picker failed:\n\n" + str(e))
 
     def _open_android(self):
@@ -164,7 +393,6 @@ class ImagePicker:
           universally-supported fallback (safe picker, no
           READ_EXTERNAL_STORAGE required on 24–32 either).
         """
-        from android import activity
         from jnius import autoclass
 
         PythonActivity = autoclass(
@@ -201,13 +429,12 @@ class ImagePicker:
                     20 if self.multi else 1,
                 )
 
-                act.startActivityForResult(
-                    intent,
-                    self.request_code,
-                )
+                # Route through the app-lifetime bridge: the listener
+                # is already bound at app startup, and the picker is
+                # registered BEFORE launching so no result can be lost.
+                self._bridge.bind()
+                self._bridge.launch(self, self.request_code, intent)
 
-                # Successfully launched the system Photo Picker.
-                self._bound = self._bind_listener()
                 Logger.info(
                     "picker: Photo Picker launched code=%d",
                     self.request_code,
@@ -258,120 +485,113 @@ class ImagePicker:
             )
 
         # p4a official API: the android.activity module dispatches
-        # on_activity_result to Python callbacks. Bind only once per
-        # picker so repeated picks do not stack duplicate listeners.
-        self._bound = self._bind_listener()
-
-        act.startActivityForResult(
-            intent,
-            self.request_code
-        )
+        # on_activity_result to the app-lifetime bridge listener
+        # (bound once at startup). Register-before-launch leaves no
+        # window in which a result could be lost.
+        self._bridge.bind()
+        self._bridge.launch(self, self.request_code, intent)
 
         Logger.info(
-            "picker: startActivityForResult code=%d sent",
+            "picker: startActivityForResult code=%d sent via bridge",
             self.request_code,
         )
 
-    def _bind_listener(self):
-        """Bind the on_activity_result listener (once per picker)."""
-        from android import activity
-
-        if not self._bound:
-            activity.bind(
-                on_activity_result=self._on_activity_result
-            )
-            return True
-
-        return True
-
-    def _on_activity_result(self, request_code, result_code, intent):
-        Logger.info(
-            "picker: on_activity_result code=%d result=%d intent=%s",
-            request_code,
-            result_code,
-            intent is not None,
-        )
-
-        if request_code != self.request_code:
-            Logger.warning(
-                "picker: ignoring result for foreign request %d",
-                request_code,
-            )
-            return
-
-        # The Java callback arrives on the Android UI thread. Move the
-        # rest of the handling to the Kivy main-loop thread before
-        # touching any Kivy widgets (Kivy is not thread-safe).
-        Clock.schedule_once(
-            lambda dt: self._handle_result(result_code, intent), 0
-        )
-
-    def _handle_result(self, result_code, intent):
+    def _on_bridge_result(self, result_code, intent):
+        """Kivy-thread: a routed activity result for THIS request."""
         try:
-            try:
-                from android.activity import unbind
-            except Exception:
-                unbind = None
-
-            # Unbind once so repeated picks do not stack listeners.
-            if self._bound:
-                if unbind is not None:
-                    unbind(
-                        on_activity_result=self._on_activity_result
-                    )
-                self._bound = False
-
             from jnius import autoclass
 
             Activity = autoclass("android.app.Activity")
 
             # User pressed Cancel / Back — safe no-op.
             if result_code != Activity.RESULT_OK:
-                Logger.info("picker: user canceled (result=%s)", result_code)
+                self._set_status(_PickerBridge.STATUS_CANCELED)
+                Logger.info(
+                    "picker: user canceled (result=%s)",
+                    result_code,
+                )
+                self._bridge.forget(self.request_code)
                 return
 
             if intent is None:
+                self._set_status(_PickerBridge.STATUS_ERROR)
                 Logger.warning("picker: RESULT_OK but intent is None")
+                self.app.show_error(
+                    "ရွေးထားတဲ့ပုံရဲ့ အချက်အလက် မရရှိပါ။\n"
+                    "ထပ်ကြိုးစားကြည့်ပါ။"
+                )
+                self._bridge.forget(self.request_code)
                 return
 
-            uris = []
-            seen = set()
+            uris = self._parse_intent(intent)
 
-            def add_uri(uri):
-                """Collect one picked URI (dedup by URI string)."""
-                if uri is None:
-                    return
+            if not uris:
+                self._set_status(_PickerBridge.STATUS_ERROR)
+                self.app.show_error(
+                    "ရွေးထားတဲ့ပုံကို မဖတ်နိုင်ပါ။"
+                )
+                self._bridge.forget(self.request_code)
+                return
 
-                key = uri.toString()
+            self._set_status(_PickerBridge.STATUS_RESULT)
 
-                if key in seen:
-                    Logger.info("picker: skip duplicate uri=%s", key)
-                    return
+            # URI copying is I/O — run it on a background worker so
+            # the UI thread never blocks (Kivy is not thread-safe, so
+            # the completion is marshalled back via Clock).
+            self._set_status(_PickerBridge.STATUS_COPYING)
+            self._copy_thread = threading.Thread(
+                target=self._copy_worker,
+                args=(uris,),
+                daemon=True,
+            )
+            self._copy_thread.start()
+        except Exception as e:
+            self._set_status(_PickerBridge.STATUS_ERROR)
+            Logger.error("picker: result handling failed: %s", e)
+            self.app.show_error(
+                "Image loading failed:\n\n" + str(e)
+            )
 
-                seen.add(key)
-                uris.append(uri)
+    def _parse_intent(self, intent):
+        """Collect picked URIs: getData() + ClipData merged and
+        deduplicated (some devices put the first URI in getData and
+        the rest in ClipData)."""
+        uris = []
+        seen = set()
 
-            # Android quirk: multi-select pickers (GET_CONTENT with
-            # EXTRA_ALLOW_MULTIPLE, and the Photo Picker) may put the
-            # FIRST uri in intent.getData() and the REST in ClipData
-            # (some devices) — or everything in ClipData (others).
-            # Handle BOTH sources and dedupe so no image is dropped.
-            clip_data = intent.getClipData()
+        def add_uri(uri):
+            if uri is None:
+                return
 
-            add_uri(intent.getData())
+            key = uri.toString()
 
-            if clip_data is not None:
-                count = clip_data.getItemCount()
-                Logger.info("picker: clip_data items=%d", count)
+            if key in seen:
+                Logger.info("picker: skip duplicate uri=%s", key)
+                return
 
-                for i in range(count):
-                    add_uri(clip_data.getItemAt(i).getUri())
+            seen.add(key)
+            uris.append(uri)
 
-            if not self.multi:
-                uris = uris[:1]
+        clip_data = intent.getClipData()
+        add_uri(intent.getData())
 
-            paths = []
+        if clip_data is not None:
+            count = clip_data.getItemCount()
+            Logger.info("picker: clip_data items=%d", count)
 
+            for i in range(count):
+                add_uri(clip_data.getItemAt(i).getUri())
+
+        if not self.multi:
+            uris = uris[:1]
+
+        return uris
+
+    def _copy_worker(self, uris):
+        """Background thread: copy every picked URI to app storage."""
+        paths = []
+
+        try:
             for index, uri in enumerate(uris):
                 Logger.info(
                     "picker: copying item %d uri=%s", index, uri
@@ -381,29 +601,66 @@ class ImagePicker:
                 if path:
                     paths.append(path)
 
-            if not paths:
-                self.app.show_error(
-                    "ရွေးထားတဲ့ပုံကို မဖတ်နိုင်ပါ။"
-                )
-                return
-
-            if self.multi and len(paths) < 2:
-                self.app.show_error(
-                    "ပုံ ၂ ပုံ ရွေးပေးပါ။\n"
-                    "ပုံတွေကို ဖိနှိပ်ပြီး (long-press) "
-                    "သို့မဟုတ် အမှတ်ခြစ်ပြီး "
-                    "၂ ပုံရွေးပါ။"
-                )
-                return
-
-            Logger.info("picker: %d file(s) ready: %s", len(paths), paths)
-            self.callback(paths)
-
-        except Exception as e:
-            Logger.error("picker: result handling failed: %s", e)
-            self.app.show_error(
-                "Image loading failed:\n\n" + str(e)
+            Clock.schedule_once(
+                lambda dt: self._finish_copy(paths, None), 0
             )
+        except Exception as e:
+            # Eager capture — the exception variable is cleared when
+            # the except block exits.
+            error = str(e)
+            Logger.error("picker: copy worker failed: %s", error)
+            Clock.schedule_once(
+                lambda dt: self._finish_copy([], error), 0
+            )
+
+    def _finish_copy(self, paths, error):
+        """Kivy-thread: finalize the copy worker result."""
+        self._bridge.forget(self.request_code)
+
+        if error:
+            self._set_status(_PickerBridge.STATUS_ERROR)
+            self.app.show_error(
+                "Image loading failed:\n\n" + error
+            )
+            return
+
+        if not paths:
+            self._set_status(_PickerBridge.STATUS_ERROR)
+            self.app.show_error(
+                "ရွေးထားတဲ့ပုံကို မဖတ်နိုင်ပါ။"
+            )
+            return
+
+        if self.multi and len(paths) < 2:
+            self._set_status(_PickerBridge.STATUS_ERROR)
+            self.app.show_error(
+                "ပုံ ၂ ပုံ ရွေးပေးပါ။\n"
+                "ပုံတွေကို ဖိနှိပ်ပြီး (long-press) "
+                "သို့မဟုတ် အမှတ်ခြစ်ပြီး "
+                "၂ ပုံရွေးပါ။"
+            )
+            return
+
+        self._set_status(_PickerBridge.STATUS_DONE)
+        Logger.info("picker: %d file(s) ready: %s", len(paths), paths)
+        self.callback(paths)
+
+    def _mark_lost(self):
+        """Lost-result recovery terminal state: the result never
+        arrived, so clean up and tell the user."""
+        self._set_status(_PickerBridge.STATUS_LOST)
+        self._bridge.forget(self.request_code)
+        Logger.warning(
+            "picker: request %d marked lost", self.request_code
+        )
+
+        try:
+            self.app.show_error(
+                "ပုံရွေးချယ်မှု ရလဒ် ပျောက်ဆုံးသွားပါသည်။\n"
+                "ထပ်ကြိုးစားကြည့်ပါ။"
+            )
+        except Exception:
+            pass
 
     def _resolve_extension(self, uri, resolver):
         """Pick a real file extension for a picked URI.
@@ -482,8 +739,7 @@ class ImagePicker:
 
         destination = os.path.join(
             self.app.input_dir,
-            "selected_%d_%d%s"
-            % (int(time.time() * 1000), index, extension)
+            "selected_%s_%d%s" % (_unique_stamp(), index, extension)
         )
 
         output = open(destination, "wb")
@@ -563,6 +819,7 @@ class ImagePicker:
                 self.app.show_error("ပုံတစ်ပုံရွေးပေးပါ။")
                 return
 
+            self._set_status(_PickerBridge.STATUS_COPYING)
             copied = []
 
             os.makedirs(
@@ -578,21 +835,19 @@ class ImagePicker:
 
                 destination = os.path.join(
                     self.app.input_dir,
-                    "selected_%d_%d%s"
-                    % (
-                        int(time.time() * 1000),
-                        index,
-                        extension
-                    )
+                    "selected_%s_%d%s"
+                    % (_unique_stamp(), index, extension)
                 )
 
                 shutil.copy2(path, destination)
                 copied.append(destination)
 
             self._close_fallback()
+            self._set_status(_PickerBridge.STATUS_DONE)
             self.callback(copied)
 
         except Exception as e:
+            self._set_status(_PickerBridge.STATUS_ERROR)
             self.app.show_error(
                 "Image selection failed:\n\n" + str(e)
             )
@@ -941,6 +1196,10 @@ class MFSApp(App):
 
     def build(self):
         self._setup_dirs()
+
+        # App-lifetime Android activity-result listener: bind the
+        # picker bridge once at startup (idempotent; no-op on desktop).
+        _PickerBridge.get(self).bind()
 
         # Single persistent root — screens swap inside it.
         # (Kivy only attaches the root widget to the window once.)
