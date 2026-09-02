@@ -1258,8 +1258,9 @@ class MFSApp(App):
             ("2. Face Enhance", self.choose_enhance_image),
             ("3. Face Blend", self.choose_blend_images),
             ("4. Face Swap", self.choose_swap_images),
-            ("5. HMH AI Chat", self.show_ai_chat),
-            ("6. Exit", self.exit_app),
+            ("5. Face Kiss", self.choose_kiss_images),
+            ("6. HMH AI Chat", self.show_ai_chat),
+            ("7. Exit", self.exit_app),
         ]
 
         for text, callback in buttons:
@@ -1505,6 +1506,64 @@ class MFSApp(App):
         face_swap(input1, input2, output_path)
 
         return output_path, "Face Swap Result"
+
+    # ---- Face Kiss ----
+    #
+    # Same sequential-single-pick flow as Blend/Swap (multi-select is
+    # unreliable on Android).
+
+    def choose_kiss_images(self):
+        self._kiss_pending = []
+        self._pick_kiss_next("Select Image 1/2 for Face Kiss")
+
+    def _pick_kiss_next(self, title):
+        picker = ImagePicker(self, title, self._kiss_picked, multi=False)
+        picker.open()
+
+    def _kiss_picked(self, paths):
+        if not paths:
+            return
+
+        self._kiss_pending.append(paths[0])
+
+        if len(self._kiss_pending) >= 2:
+            self.kiss_selected(list(self._kiss_pending))
+            return
+
+        self._pick_kiss_next("Select Image 2/2 for Face Kiss")
+
+    def kiss_selected(self, paths):
+        if len(paths) < 2:
+            self.show_error("Face Kiss အတွက် ပုံ ၂ ပုံရွေးပေးပါ။")
+            return
+
+        input1 = os.path.join(self.input_dir, "face1.jpg")
+        input2 = os.path.join(self.input_dir, "face2.jpg")
+        output_path = os.path.join(
+            self.output_dir, "MFS_face_kiss.jpg"
+        )
+
+        self._run_async(
+            "Face Kiss ပြုလုပ်နေပါသည်...",
+            self._kiss_worker,
+            paths[0],
+            paths[1],
+            input1,
+            input2,
+            output_path
+        )
+
+    def _kiss_worker(
+        self, src1, src2, input1, input2, output_path
+    ):
+        shutil.copy(src1, input1)
+        shutil.copy(src2, input2)
+
+        from modules.face_kiss import face_kiss
+
+        face_kiss(input1, input2, output_path)
+
+        return output_path, "Face Kiss Result"
 
     # ---- HMH AI Chat ----
 
