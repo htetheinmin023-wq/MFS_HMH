@@ -121,38 +121,43 @@ jobs:
                   print(f"FAIL {u}  {e}")
           EOF
 
-      - name: Build APK
-        # freetype (Pillow's C dependency) is fetched by python-for-android
-        # from download.savannah.gnu.org, which returns a persistent 502 to
-        # the runner (all 5 attempts of run 55 died there). Pre-place the
-        # identical tarball from the official SourceForge mirror into p4a's
-        # package cache each attempt so p4a skips its own download.
+      - name: Pre-download freetype
+        # p4a fetches freetype (Pillow's C dependency) from
+        # download.savannah.gnu.org, which returns a persistent 502 to the
+        # runner. Pre-place the identical tarball from the SourceForge mirror
+        # into p4a's package cache BEFORE the build.
+        # IMPORTANT: p4a only trusts a cached tarball when the accompanying
+        # ".mark-<filename>" marker exists - without it p4a deletes the file
+        # and downloads again anyway (that is why run 70 still hit the 502).
         run: |
           FT_DIR=.buildozer/android/platform/build-arm64-v8a/packages/freetype
           FT_FILE=freetype-2.14.1.tar.gz
-          for i in 1 2 3 4 5; do
-            mkdir -p "$FT_DIR"
-            if [ ! -f "$FT_DIR/$FT_FILE" ]; then
-              echo "Pre-fetching $FT_FILE from SourceForge mirror..."
-              for url in \
-                "https://sourceforge.net/projects/freetype/files/freetype2/2.14.1/freetype-2.14.1.tar.gz/download" \
-                "https://download.savannah.gnu.org/releases/freetype/freetype-2.14.1.tar.gz"; do
-                if curl -fL --retry 5 --connect-timeout 30 -o "$FT_DIR/$FT_FILE" "$url"; then
-                  echo "OK: $url"
-                  break
-                fi
+          MARKER=".mark-$FT_FILE"
+          mkdir -p "$FT_DIR"
+          if [ ! -f "$FT_DIR/$FT_FILE" ]; then
+            for url in \
+              "https://sourceforge.net/projects/freetype/files/freetype2/2.14.1/freetype-2.14.1.tar.gz/download" \
+              "https://download.savannah.gnu.org/releases/freetype/freetype-2.14.1.tar.gz"; do
+              echo "Trying $url ..."
+              if curl -fL --retry 5 --max-time 120 -o "$FT_DIR/$FT_FILE" "$url"; then
+                echo "OK: $url"
+                break
+              else
                 echo "FAILED: $url"
-              done
-              ls -la "$FT_DIR"
-            fi
-            if buildozer android debug; then
-              exit 0
-            fi
-            echo "Build attempt $i failed. Retrying..."
-            rm -rf .buildozer/android/platform/build-arm64-v8a/packages
-            sleep 30
-          done
-          exit 1
+              fi
+            done
+          fi
+          if [ -f "$FT_DIR/$FT_FILE" ]; then
+            : > "$FT_DIR/$MARKER"
+            echo "Freetype ready (tarball + marker present)"
+          else
+            echo "FAIL: could not download freetype"
+            exit 1
+          fi
+          ls -la "$FT_DIR"
+
+      - name: Build APK
+        run: buildozer android debug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
