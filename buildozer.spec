@@ -19,14 +19,14 @@ source.include_exts = py,png,jpg,jpeg,kv,atlas,xml,ttf
 # cp314-android_24 wheels), then host pip rejects them during the
 # python-installs stage (run 58: "is not a supported wheel on this
 # platform"). 3.4.1 resolves to py3-none-any and installs cleanly.
-requirements = python3,kivy,pillow,charset_normalizer==3.4.1
+requirements = python3,kivy,pillow,opencv,numpy,charset_normalizer==3.4.1
 
 orientation = portrait
 fullscreen = 0
 
 android.api = 35
 android.minapi = 24
-android.ndk = 25b
+android.ndk = 26b
 android.ndk_api = 24
 # android.sdk is deprecated + ignored by buildozer 1.6.0. Without
 # android.sdk_path buildozer downloads its OWN SDK (commandline tools
