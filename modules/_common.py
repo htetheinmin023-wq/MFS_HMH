@@ -99,9 +99,11 @@ def _get_cascades():
         search_dirs = [assets_dir()]
 
         # opencv-python ships the XML files in cv2.data.haarcascades.
+        # (cv2.data is NOT available in the p4a/Android opencv build, so only
+        # probe the attribute on the module-level cv2 - never re-import cv2
+        # inside this function, it would shadow the global and trigger
+        # UnboundLocalError when the inner import is skipped.)
         try:
-            import cv2.data
-
             search_dirs.append(cv2.data.haarcascades)
         except Exception:
             pass
