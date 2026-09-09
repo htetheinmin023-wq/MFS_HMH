@@ -11,8 +11,8 @@ Returns the output path on success.
 from PIL import Image, ImageDraw
 
 from ._common import (
-    HAVE_CV2,
     NO_FACE_MSG,
+    cv2_usable,
     cv_to_pil,
     detect_faces,
     load_image,
@@ -24,7 +24,10 @@ from ._common import (
 def face_scan(input_path, output_path):
     img = load_image(input_path)
 
-    if HAVE_CV2:
+    # Only run the real detection when at least one cascade is available;
+    # otherwise (no cv2 / cascades unreachable) fall through to the PIL
+    # scan frame instead of erroring.
+    if cv2_usable():
         import cv2
 
         bgr = pil_to_cv(img)

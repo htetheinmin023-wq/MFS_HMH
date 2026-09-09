@@ -124,6 +124,23 @@ def _get_cascades():
     return _cascades
 
 
+def cv2_usable():
+    """True only when cv2 is importable AND at least one Haar cascade loads.
+
+    On p4a/Android builds cv2.data is unavailable and the packaged XML
+    files may be unreachable, so detection can silently end up with zero
+    classifiers. Callers use this helper to choose between the real
+    OpenCV pipeline and the PIL fallback instead of surfacing a
+    misleading "no face found" error.
+    """
+    if not HAVE_CV2:
+        return False
+    try:
+        return len(_get_cascades()) > 0
+    except Exception:
+        return False
+
+
 def detect_faces(bgr_image):
     """Detect faces in a BGR image.
 

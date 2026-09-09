@@ -20,7 +20,7 @@ faces are roughly frontal and similar in size.
 from PIL import Image, ImageDraw, ImageFilter
 
 from ._common import (
-    HAVE_CV2,
+    cv2_usable,
     cv_to_pil,
     detect_faces,
     largest_face,
@@ -74,9 +74,25 @@ def _swap_fallback(source_path, target_path, output_path):
 
 
 def face_swap(source_path, target_path, output_path):
-    if not HAVE_CV2:
+    # cv2_usable() is False when cv2 is absent OR no Haar cascade could be
+    # loaded (common on p4a/Android, where cv2.data does not exist and the
+    # packaged XMLs can be unreachable). In both cases the swap must still
+    # produce an image -> PIL fallback instead of a "no face found"
+    # dead-end that makes the feature look broken.
+    if not cv2_usable():
         return _swap_fallback(source_path, target_path, output_path)
 
+    try:
+        return _swap_cv2(source_path, target_path, output_path)
+    except ValueError:
+        # Genuine user-facing error (e.g. no face in the photo).
+        raise
+    except Exception:
+        # Any unexpected cv2 failure: degrade gracefully, never crash.
+        return _swap_fallback(source_path, target_path, output_path)
+
+
+def _swap_cv2(source_path, target_path, output_path):
     import cv2
     import numpy as np
 
