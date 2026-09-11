@@ -1299,8 +1299,11 @@ class MFSApp(App):
     def _worker_wrapper(self, worker, args):
         try:
             out_path, title = worker(*args)
+            # Entry point used by the result screen's "ပြန်လုပ်" button,
+            # set by each *_selected method before _run_async().
+            again = getattr(self, "_result_again", None)
             Clock.schedule_once(
-                lambda dt: self.show_result(out_path, title)
+                lambda dt: self.show_result(out_path, title, again=again)
             )
         except Exception as e:
             # Eager capture — lazy str(e) in the Clock lambda would
@@ -1331,6 +1334,8 @@ class MFSApp(App):
         output_path = os.path.join(
             self.output_dir, "MFS_face_scan.jpg"
         )
+
+        self._result_again = self.choose_scan_image
 
         self._run_async(
             "Face Scan လုပ်နေပါသည်...",
@@ -1370,6 +1375,8 @@ class MFSApp(App):
         output_path = os.path.join(
             self.output_dir, "MFS_face_enhanced.jpg"
         )
+
+        self._result_again = self.choose_enhance_image
 
         self._run_async(
             "Face Enhance လုပ်နေပါသည်...",
@@ -1428,6 +1435,8 @@ class MFSApp(App):
             self.output_dir, "MFS_blend_result.jpg"
         )
 
+        self._result_again = self.choose_blend_images
+
         self._run_async(
             "Face Blend လုပ်နေပါသည်...",
             self._blend_worker,
@@ -1484,6 +1493,8 @@ class MFSApp(App):
         output_path = os.path.join(
             self.output_dir, "MFS_face_swapped.jpg"
         )
+
+        self._result_again = self.choose_swap_images
 
         self._run_async(
             "Face Swap လုပ်နေပါသည်...",
@@ -1542,6 +1553,8 @@ class MFSApp(App):
         output_path = os.path.join(
             self.output_dir, "MFS_face_kiss.jpg"
         )
+
+        self._result_again = self.choose_kiss_images
 
         self._run_async(
             "Face Kiss ပြုလုပ်နေပါသည်...",
@@ -1626,7 +1639,7 @@ class MFSApp(App):
 
     # ---- screens ----
 
-    def show_result(self, path, title):
+    def show_result(self, path, title, again=None):
         layout = BoxLayout(
             orientation="vertical",
             spacing=10,
@@ -1649,6 +1662,31 @@ class MFSApp(App):
                 Label(text="Result file မတွေ့ပါ။")
             )
 
+        # Action row (own row so the labels stay readable on phones):
+        # Save / Share, plus "ပြန်လုပ်" for repeatable features.
+        actions = BoxLayout(
+            orientation="horizontal",
+            spacing=8,
+            size_hint_y=None,
+            height=55
+        )
+
+        save_btn = Button(text="သိမ်း (Save)")
+        share_btn = Button(text="Share")
+
+        save_btn.bind(on_press=lambda x: self._save_result_image(path))
+        share_btn.bind(on_press=lambda x: self._share_result_image(path))
+
+        actions.add_widget(save_btn)
+        actions.add_widget(share_btn)
+
+        if callable(again):
+            retry_btn = Button(text="ပြန်လုပ်")
+            retry_btn.bind(on_press=lambda x: again())
+            actions.add_widget(retry_btn)
+
+        layout.add_widget(actions)
+
         back = Button(
             text="Back",
             size_hint_y=None,
@@ -1660,6 +1698,128 @@ class MFSApp(App):
         layout.add_widget(back)
 
         self._set_screen(layout)
+
+    # ---- saving / sharing the result image ----
+    #
+    # Android 10+ (scoped storage) does not allow writing arbitrary paths
+    # in shared storage, so the image is inserted into the MediaStore
+    # "Pictures/MFSHMH" collection first. That also yields a content://
+    # URI which can be handed to the system share sheet. When none of that
+    # is available (desktop build, restricted device) the file is copied
+    # into the app's own external folder instead, so it can still be
+    # reached from a file manager.
+
+    def _result_public_uri(self, path):
+        """Copy ``path`` into MediaStore, returning its content:// URI."""
+        try:
+            from android import mActivity
+            from jnius import autoclass
+        except Exception:
+            return None
+
+        try:
+            ContentValues = autoclass("android.content.ContentValues")
+            MediaStoreImages = autoclass(
+                "android.provider.MediaStore$Images$Media"
+            )
+            BuildVersion = autoclass("android.os.Build$VERSION")
+
+            values = ContentValues()
+            values.put(MediaStoreImages.DISPLAY_NAME, os.path.basename(path))
+            values.put(MediaStoreImages.MIME_TYPE, "image/jpeg")
+
+            sdk = int(BuildVersion.SDK_INT)
+            if sdk >= 29:
+                values.put(MediaStoreImages.RELATIVE_PATH, "Pictures/MFSHMH")
+                values.put(MediaStoreImages.IS_PENDING, 1)
+
+            resolver = mActivity.getContentResolver()
+            uri = resolver.insert(
+                MediaStoreImages.EXTERNAL_CONTENT_URI, values
+            )
+            if uri is None:
+                return None
+
+            stream = resolver.openOutputStream(uri)
+            with open(path, "rb") as handle:
+                stream.write(handle.read())
+            stream.flush()
+            stream.close()
+
+            if sdk >= 29:
+                done = ContentValues()
+                done.put(MediaStoreImages.IS_PENDING, 0)
+                resolver.update(uri, done, None, None)
+
+            return uri
+        except Exception:
+            Logger.exception("result: MediaStore insert failed")
+            return None
+
+    def _save_result_image(self, path):
+        """Save the result so the user can find it later."""
+        if not os.path.exists(path):
+            self.show_error("Result file မတွေ့ပါ။")
+            return
+
+        if self._result_public_uri(path) is not None:
+            self._show_status(
+                "ပုံကို Gallery (Pictures/MFSHMH) ထဲ သိမ်းပြီးပါပြီ။"
+            )
+            return
+
+        partner_dir = self.output_dir
+        try:
+            from android import mActivity
+
+            ext = mActivity.getExternalFilesDir(None)
+            if ext is not None:
+                partner_dir = os.path.join(ext.getAbsolutePath(), "Pictures")
+        except Exception:
+            pass
+
+        try:
+            os.makedirs(partner_dir, exist_ok=True)
+            target = os.path.join(partner_dir, "MFS_result.jpg")
+            shutil.copy(path, target)
+            self._show_status("ပုံကို သိမ်းပြီးပါပြီ:\n\n" + target)
+        except Exception as e:
+            self.show_error("ပုံ သိမ်းလို့မရပါ:\n\n" + str(e))
+
+    def _share_result_image(self, path):
+        """Open the Android share sheet for the result image."""
+        if not os.path.exists(path):
+            self.show_error("Result file မတွေ့ပါ။")
+            return
+
+        uri = self._result_public_uri(path)
+        if uri is None:
+            self._show_status(
+                "Share လုပ်လို့မရပါ။ ပုံကို သိမ်း (Save) ပြီး "
+                "Gallery ကနေ share လုပ်ပါ။"
+            )
+            return
+
+        try:
+            from android import mActivity
+            from jnius import autoclass
+
+            Intent = autoclass("android.content.Intent")
+            String = autoclass("java.lang.String")
+
+            intent = Intent()
+            intent.setAction(Intent.ACTION_SEND)
+            intent.setType("image/jpeg")
+            intent.putExtra(Intent.EXTRA_STREAM, uri)
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+
+            chooser = Intent.createChooser(
+                intent, String("Share လုပ်ရန် ရွေးပါ")
+            )
+            mActivity.startActivity(chooser)
+        except Exception as e:
+            Logger.exception("result: share failed")
+            self._show_status("Share လုပ်လို့မရပါ:\n\n" + str(e))
 
     def show_error(self, message):
         layout = BoxLayout(

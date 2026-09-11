@@ -36,7 +36,7 @@ android.ndk_api = 24
 android.sdk_path = /usr/local/lib/android/sdk
 android.accept_sdk_license = True
 android.archs = arm64-v8a
-android.permissions = INTERNET
+android.permissions = INTERNET,WRITE_EXTERNAL_STORAGE
 
 [buildozer]
 
